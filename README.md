@@ -9,32 +9,50 @@ OpenCode TUI plugin that displays [CrofAI](https://crof.ai/) usage stats in the 
 
 ## Installation
 
-### Option 1: npm
+### Option 1: Clone into plugins directory (recommended)
 
 ```bash
-npm install opencode-crofai-sidebar
+mkdir -p ~/.config/opencode/plugins
+git clone https://github.com/Red44/crofai-opencode.git ~/.config/opencode/plugins/crofai-opencode
+cd ~/.config/opencode/plugins/crofai-opencode
+bun install
+bun run build
 ```
 
-### Option 2: OpenCode plugin install
+Then add to `~/.config/opencode/tui.json`:
 
-```bash
-opencode plugin install opencode-crofai-sidebar
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [
+    "./plugins/crofai-opencode/dist/tui.js"
+  ]
+}
 ```
 
-### Option 3: From source
+### Option 2: Project-level
 
 ```bash
-git clone https://github.com/sst/opencode-crofai-sidebar.git
-cd opencode-crofai-sidebar
-npm install
-npm run build
-npm link
-# Then in your project: npm link opencode-crofai-sidebar
+git clone https://github.com/Red44/crofai-opencode.git .opencode/plugins/crofai-opencode
+cd .opencode/plugins/crofai-opencode
+bun install
+bun run build
+```
+
+Then in `.opencode/tui.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [
+    "./plugins/crofai-opencode/dist/tui.js"
+  ]
+}
 ```
 
 ## Configuration
 
-### 1. Set your API key
+### Set your API key
 
 ```bash
 export CROFAI_API_KEY="nahcrof_yourkeyhere"
@@ -42,28 +60,19 @@ export CROFAI_API_KEY="nahcrof_yourkeyhere"
 
 Add this to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) to persist it.
 
-### 2. Register the plugin in `tui.json`
-
-Create or edit `.opencode/tui.json` in your project root (or `~/.config/opencode/tui.json` for global use):
-
-```json
-{
-  "$schema": "https://opencode.ai/tui.json",
-  "plugin": [
-    "opencode-crofai-sidebar/tui"
-  ]
-}
-```
-
-The `"opencode-crofai-sidebar/tui"` path resolves to the `exports["./tui"]` entrypoint defined in the package.
-
-### 3. Start OpenCode
+### Start OpenCode
 
 ```bash
 opencode
 ```
 
 You should see a **CrofAI** section in the sidebar showing your requests/day and credit balance.
+
+## Auto-updates
+
+The plugin checks for updates from GitHub on startup (async, non-blocking). If a new version is found it pulls the latest code and shows a notification in the sidebar. Restart OpenCode to apply the update.
+
+Checks repeat every 24 hours while OpenCode is running.
 
 ## What it shows
 
@@ -73,14 +82,15 @@ You should see a **CrofAI** section in the sidebar showing your requests/day and
 | API key not set | `CrofAI` + `Set CROFAI_API_KEY` + `export CROFAI_API_KEY=...` |
 | Fetch failed | `CrofAI` + `Failed to fetch usage` |
 | Loading | `CrofAI` + `Loading...` |
+| Update available | `Plugin updated - restart to apply` |
 
 Data refreshes automatically every 30 seconds.
 
 ## Troubleshooting
 
 **Plugin doesn't appear in sidebar:**
-- Ensure the package is installed: `ls node_modules/opencode-crofai-sidebar`
-- Ensure `tui.json` references `"opencode-crofai-sidebar/tui"` (not a file path)
+- Ensure the build output exists: `ls ~/.config/opencode/plugins/crofai-opencode/dist/tui.js`
+- Ensure `tui.json` points to the correct path
 - Restart OpenCode
 
 **"Set CROFAI_API_KEY" shown:**
@@ -93,10 +103,10 @@ Data refreshes automatically every 30 seconds.
 ## Development
 
 ```bash
-git clone https://github.com/sst/opencode-crofai-sidebar.git
-cd opencode-crofai-sidebar
-npm install
-npm run build
+git clone https://github.com/Red44/crofai-opencode.git
+cd crofai-opencode
+bun install
+bun run build
 ```
 
 ## License
