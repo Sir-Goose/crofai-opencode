@@ -14,15 +14,9 @@ bun install
 It also configures the global OpenCode `opencode.json` CrofAI provider automatically using the live `https://crof.ai/v1/models` API.
 On plugin startup it also performs a best-effort live refresh of the running OpenCode config, so newly fetched CrofAI models can apply without a restart.
 
-## Update
+## Updating
 
-```bash
-git pull
-bun install
-```
-
-Running `bun install` again keeps the entry up to date and avoids duplicate plugin entries.
-It also refreshes the CrofAI model list in `opencode.json` while preserving an existing CrofAI API key if one is already configured.
+On every OpenCode start the plugin runs `git pull --ff-only` in the background. If new commits are found it runs `bun install` automatically. No manual steps needed.
 
 ## Requirements
 
@@ -40,6 +34,7 @@ It also refreshes the CrofAI model list in `opencode.json` while preserving an e
 - Updates in real-time after every message
 - Falls back to 30-second interval if no messages are sent
 - Refreshes the CrofAI model list from `/v1/models` and pushes a best-effort live config update on plugin startup
+- Auto-updates from git on every OpenCode start (non-blocking)
 
 ## License
 

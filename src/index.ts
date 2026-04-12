@@ -1,12 +1,43 @@
 import { createElement, createTextNode, insert } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import type { TuiPlugin, TuiPluginModule, TuiPluginApi, EventMessageUpdated, EventSessionUpdated } from "@opencode-ai/plugin/tui"
+import { exec as execCb } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { promisify } from "node:util"
+import { fileURLToPath } from "node:url"
 
 const CROFAI_URL = "https://crof.ai/usage_api/"
 const PRICING_URL = "https://crof.ai/pricing"
+
+const execAsync = promisify(execCb)
+
+function findGitRepo(startDir: string): string | null {
+  let dir = startDir
+  for (let i = 0; i < 10; i++) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
+async function autoUpdate(): Promise<void> {
+  try {
+    const thisDir = path.dirname(fileURLToPath(import.meta.url))
+    const repoDir = findGitRepo(thisDir)
+    if (!repoDir) return
+
+    const { stdout } = await execAsync("git pull --ff-only", { cwd: repoDir })
+    if (stdout.includes("Already up to date.")) return
+
+    await execAsync("bun install", { cwd: repoDir })
+  } catch {
+    return
+  }
+}
 
 interface UsageData {
   credits: number
@@ -228,6 +259,7 @@ function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, tps:
 
 const tui: TuiPlugin = async (api) => {
   void refreshGlobalOpencodeConfig(api)
+  void autoUpdate()
 
   const key = getCrofaiKey(api)
   const crofaiProviderID = getCrofaiProviderID(api)
