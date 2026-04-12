@@ -99,6 +99,43 @@ function getSessionCrofaiModelID(api: TuiPluginApi, sessionID: string, crofaiPro
   return undefined
 }
 
+interface SessionTokens {
+  input: number
+  output: number
+  reasoning: number
+  cacheRead: number
+  cacheWrite: number
+  total: number
+}
+
+function getSessionTokens(api: TuiPluginApi, sessionID: string): SessionTokens {
+  const messages = api.state.session.messages(sessionID)
+  let input = 0
+  let output = 0
+  let reasoning = 0
+  let cacheRead = 0
+  let cacheWrite = 0
+
+  for (const msg of messages) {
+    if (msg.role === "assistant" && msg.tokens) {
+      input += msg.tokens.input || 0
+      output += msg.tokens.output || 0
+      reasoning += msg.tokens.reasoning || 0
+      cacheRead += msg.tokens.cache?.read || 0
+      cacheWrite += msg.tokens.cache?.write || 0
+    }
+  }
+
+  return {
+    input,
+    output,
+    reasoning,
+    cacheRead,
+    cacheWrite,
+    total: input + output + reasoning + cacheRead + cacheWrite,
+  }
+}
+
 async function fetchUsage(key: string): Promise<UsageData | null> {
   try {
     const res = await fetch(CROFAI_URL, {
@@ -207,7 +244,14 @@ async function refreshGlobalOpencodeConfig(api: TuiPluginApi): Promise<void> {
   }
 }
 
-function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, tps: number | null) {
+function buildSidebar(
+  api: TuiPluginApi,
+  d: UsageData | null,
+  err: boolean,
+  tps: number | null,
+  tokens: SessionTokens | null,
+  modelID: string | null,
+) {
   const t = api.theme.current
 
   const root = createElement("box", {
@@ -225,6 +269,22 @@ function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, tps:
   const title = createElement("text", { fg: t.primary })
   insert(title, createTextNode("CrofAI"))
   insert(root, title)
+
+  if (modelID) {
+    const modelLine = createElement("text", { fg: t.textMuted })
+    insert(modelLine, createTextNode("Model: " + modelID))
+    insert(root, modelLine)
+  }
+
+  if (tokens && tokens.total > 0) {
+    const tokenLine = createElement("text", { fg: t.info })
+    const parts = []
+    if (tokens.input > 0) parts.push("in:" + tokens.input)
+    if (tokens.output > 0) parts.push("out:" + tokens.output)
+    if (tokens.reasoning > 0) parts.push("r:" + tokens.reasoning)
+    insert(tokenLine, createTextNode("Tokens: " + parts.join(" ")))
+    insert(root, tokenLine)
+  }
 
   if (err) {
     const errText = createElement("text", { fg: t.error })
@@ -308,7 +368,8 @@ const tui: TuiPlugin = async (api) => {
         if (!isCrofaiSession(api, props.session_id, crofaiProviderID)) return null
         const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderID)
         const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
-        return buildSidebar(api, getData(), getErr(), tps)
+        const tokens = getSessionTokens(api, props.session_id)
+        return buildSidebar(api, getData(), getErr(), tps, tokens, modelID ?? null)
       },
     },
   })
