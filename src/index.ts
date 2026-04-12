@@ -9,13 +9,14 @@ interface UsageData {
   usable_requests: number | null
 }
 
-function getApiKey(): string | undefined {
-  return process.env.CROFAI_API_KEY
+function getCrofaiKey(api: TuiPluginApi): string | undefined {
+  const fromEnv = process.env.CROFAI_API_KEY
+  if (fromEnv) return fromEnv
+  const provider = api.state.provider.find(p => p.name === "CrofAI")
+  return provider?.key
 }
 
-async function fetchUsage(): Promise<UsageData | null> {
-  const key = getApiKey()
-  if (!key) return null
+async function fetchUsage(key: string): Promise<UsageData | null> {
   try {
     const res = await fetch(CROFAI_URL, {
       headers: { Authorization: `Bearer ${key}` },
@@ -27,7 +28,7 @@ async function fetchUsage(): Promise<UsageData | null> {
   }
 }
 
-function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, noKey: boolean) {
+function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean) {
   const t = api.theme.current
 
   const root = createElement("box", {
@@ -46,14 +47,7 @@ function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, noKe
   insert(title, createTextNode("CrofAI"))
   insert(root, title)
 
-  if (noKey) {
-    const warnText = createElement("text", { fg: t.warning })
-    insert(warnText, createTextNode("Set CROFAI_API_KEY"))
-    insert(root, warnText)
-    const hintText = createElement("text", { fg: t.textMuted })
-    insert(hintText, createTextNode("export CROFAI_API_KEY=..."))
-    insert(root, hintText)
-  } else if (err) {
+  if (err) {
     const errText = createElement("text", { fg: t.error })
     insert(errText, createTextNode("Failed to fetch usage"))
     insert(root, errText)
@@ -81,14 +75,14 @@ function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, noKe
 }
 
 const tui: TuiPlugin = async (api) => {
+  const key = getCrofaiKey(api)
+  if (!key) return
+
   const [getData, setData] = createSignal<UsageData | null>(null)
   const [getErr, setErr] = createSignal(false)
 
-  const hasKey = !!getApiKey()
-
   const refresh = async () => {
-    if (!hasKey) return
-    const result = await fetchUsage()
+    const result = await fetchUsage(key)
     if (result) { setData(result); setErr(false) }
     else { setErr(true) }
   }
@@ -104,7 +98,7 @@ const tui: TuiPlugin = async (api) => {
     order: 150,
     slots: {
       sidebar_content() {
-        return buildSidebar(api, getData(), getErr(), !hasKey)
+        return buildSidebar(api, getData(), getErr())
       },
     },
   })
