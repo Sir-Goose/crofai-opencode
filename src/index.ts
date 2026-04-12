@@ -53,6 +53,7 @@ interface ModelsApiModel {
   id: string
   context_length: number | string
   max_completion_tokens: number | string
+  speed?: number
 }
 
 const OPENCODE_CONFIG_PATH = path.join(os.homedir(), ".config", "opencode", "opencode.json")
