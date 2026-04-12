@@ -1,12 +1,8 @@
 import { createElement, createTextNode, insert } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import type { TuiPlugin, TuiPluginModule, TuiPluginApi } from "@opencode-ai/plugin/tui"
-import { readFileSync, writeFileSync } from "fs"
 
 const CROFAI_URL = "https://crof.ai/usage_api/"
-const COMMIT_URL = "https://api.github.com/repos/Red44/crofai-opencode/commits/main"
-const FILE_URL = "https://raw.githubusercontent.com/Red44/crofai-opencode/main/src/index.ts"
-const UPDATE_INTERVAL = 24 * 60 * 60 * 1000
 
 interface UsageData {
   credits: number
@@ -21,6 +17,24 @@ function getCrofaiKey(api: TuiPluginApi): string | undefined {
   return provider.key || (provider.options?.apiKey as string | undefined)
 }
 
+function getCrofaiProviderID(api: TuiPluginApi): string | undefined {
+  return api.state.provider.find(p => p.name === "CrofAI")?.id
+}
+
+function isCrofaiSession(api: TuiPluginApi, sessionID: string, crofaiProviderID: string): boolean {
+  const messages = api.state.session.messages(sessionID)
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message.role === "assistant") {
+      return message.providerID === crofaiProviderID
+    }
+    if (message.role === "user") {
+      return message.model.providerID === crofaiProviderID
+    }
+  }
+  return false
+}
+
 async function fetchUsage(key: string): Promise<UsageData | null> {
   try {
     const res = await fetch(CROFAI_URL, {
@@ -33,7 +47,7 @@ async function fetchUsage(key: string): Promise<UsageData | null> {
   }
 }
 
-function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, updated: boolean) {
+function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean) {
   const t = api.theme.current
 
   const root = createElement("box", {
@@ -76,22 +90,16 @@ function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, upda
     insert(root, credLine)
   }
 
-  if (updated) {
-    const upd = createElement("text", { fg: t.success })
-    insert(upd, createTextNode("Updated - restart to apply"))
-    insert(root, upd)
-  }
-
   return root
 }
 
 const tui: TuiPlugin = async (api) => {
   const key = getCrofaiKey(api)
-  if (!key) return
+  const crofaiProviderID = getCrofaiProviderID(api)
+  if (!key || !crofaiProviderID) return
 
   const [getData, setData] = createSignal<UsageData | null>(null)
   const [getErr, setErr] = createSignal(false)
-  const [getUpdated, setUpdated] = createSignal(false)
 
   const refresh = async () => {
     const result = await fetchUsage(key)
@@ -102,37 +110,16 @@ const tui: TuiPlugin = async (api) => {
   await refresh()
   const usageInterval = setInterval(refresh, 30000)
 
-  const checkUpdate = async () => {
-    try {
-      const ownPath = new URL(import.meta.url).pathname
-      const shaPath = ownPath.replace(/\.ts$/, ".sha")
-      const res = await fetch(COMMIT_URL, { headers: { "User-Agent": "opencode-crofai-sidebar" } })
-      if (!res.ok) return
-      const remoteSha: string = (await res.json()).sha
-      let localSha = ""
-      try { localSha = readFileSync(shaPath, "utf8").trim() } catch {}
-      if (localSha === remoteSha) return
-      const fileRes = await fetch(FILE_URL)
-      if (!fileRes.ok) return
-      writeFileSync(ownPath, await fileRes.text())
-      writeFileSync(shaPath, remoteSha)
-      setUpdated(true)
-    } catch {}
-  }
-
-  checkUpdate()
-  const updateInterval = setInterval(checkUpdate, UPDATE_INTERVAL)
-
   api.lifecycle.onDispose(() => {
     clearInterval(usageInterval)
-    clearInterval(updateInterval)
   })
 
   api.slots.register({
     order: 150,
     slots: {
-      sidebar_content() {
-        return buildSidebar(api, getData(), getErr(), getUpdated())
+      sidebar_content(_ctx, props) {
+        if (!isCrofaiSession(api, props.session_id, crofaiProviderID)) return null
+        return buildSidebar(api, getData(), getErr())
       },
     },
   })
