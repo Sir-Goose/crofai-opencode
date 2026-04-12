@@ -1,6 +1,9 @@
 import { createElement, createTextNode, insert } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import type { TuiPlugin, TuiPluginModule, TuiPluginApi, EventMessageUpdated, EventSessionUpdated } from "@opencode-ai/plugin/tui"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 const CROFAI_URL = "https://crof.ai/usage_api/"
 const PRICING_URL = "https://crof.ai/pricing"
@@ -14,6 +17,15 @@ interface PricingModel {
   id: string
   speed?: number
 }
+
+interface ModelsApiModel {
+  id: string
+  context_length: number | string
+  max_completion_tokens: number | string
+}
+
+const OPENCODE_CONFIG_PATH = path.join(os.homedir(), ".config", "opencode", "opencode.json")
+const OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
 
 function getCrofaiKey(api: TuiPluginApi): string | undefined {
   const provider = api.state.provider.find(p => p.name === "CrofAI")
@@ -80,6 +92,89 @@ async function fetchPricingModels(): Promise<PricingModel[] | null> {
   }
 }
 
+async function fetchModelsApi(): Promise<ModelsApiModel[] | null> {
+  try {
+    const res = await fetch(`${CROFAI_URL.replace("/usage_api/", "/v1/models")}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!Array.isArray(data.data)) return null
+    return data.data as ModelsApiModel[]
+  } catch (_error) {
+    return null
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function readOpencodeConfig(): Record<string, unknown> {
+  if (!fs.existsSync(OPENCODE_CONFIG_PATH)) {
+    return { $schema: OPENCODE_CONFIG_SCHEMA, provider: {} }
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(OPENCODE_CONFIG_PATH, "utf8"))
+    if (!isObject(parsed)) return { $schema: OPENCODE_CONFIG_SCHEMA, provider: {} }
+    return parsed
+  } catch (_error) {
+    return { $schema: OPENCODE_CONFIG_SCHEMA, provider: {} }
+  }
+}
+
+function toInstalledModelConfig(model: ModelsApiModel) {
+  const context = Number(model.context_length)
+  const output = Number(model.max_completion_tokens)
+
+  return {
+    name: `CrofAI: ${model.id}`,
+    limit: {
+      context: Number.isFinite(context) ? context : 0,
+      output: Number.isFinite(output) ? output : 0,
+    },
+  }
+}
+
+async function refreshGlobalOpencodeConfig(api: TuiPluginApi): Promise<void> {
+  const models = await fetchModelsApi()
+  if (!models) return
+
+  const config = readOpencodeConfig()
+  const provider = isObject(config.provider) ? config.provider : {}
+  const existingCrofai = isObject(provider.CrofAI) ? provider.CrofAI : {}
+  const existingOptions = isObject(existingCrofai.options) ? existingCrofai.options : {}
+
+  const nextConfig = {
+    ...config,
+    $schema: typeof config.$schema === "string" ? config.$schema : OPENCODE_CONFIG_SCHEMA,
+    provider: {
+      ...provider,
+      CrofAI: {
+        ...existingCrofai,
+        name: "CrofAI",
+        npm: "@ai-sdk/openai-compatible",
+        options: {
+          ...existingOptions,
+          ...(typeof existingOptions.apiKey === "string" ? {} : { apiKey: process.env.CROFAI_API_KEY || "{env:CROFAI_API_KEY}" }),
+          baseURL: "https://crof.ai/v1",
+        },
+        models: Object.fromEntries(models.map((model) => [model.id, toInstalledModelConfig(model)])),
+      },
+    },
+  }
+
+  fs.mkdirSync(path.dirname(OPENCODE_CONFIG_PATH), { recursive: true })
+  fs.writeFileSync(OPENCODE_CONFIG_PATH, JSON.stringify(nextConfig, null, 2) + "\n")
+
+  try {
+    await api.client.global.config.update({
+      config: nextConfig,
+    })
+  } catch (_error) {
+    // file update already succeeded; live runtime update is best-effort
+  }
+}
+
 function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, tps: number | null) {
   const t = api.theme.current
 
@@ -117,21 +212,23 @@ function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, tps:
       insert(planText, createTextNode("Pay-per-token"))
       insert(root, planText)
     }
-    const credFg = d.credits < 0 ? t.error : t.success
-    const credLine = createElement("text", { fg: credFg })
-    insert(credLine, createTextNode("Credits: $" + d.credits.toFixed(4)))
-    insert(root, credLine)
     if (tps !== null) {
       const tpsLine = createElement("text", { fg: t.textMuted })
       insert(tpsLine, createTextNode("Speed: ~" + tps + " t/s"))
       insert(root, tpsLine)
     }
+    const credFg = d.credits < 0 ? t.error : t.success
+    const credLine = createElement("text", { fg: credFg })
+    insert(credLine, createTextNode("Credits: $" + d.credits.toFixed(4)))
+    insert(root, credLine)
   }
 
   return root
 }
 
 const tui: TuiPlugin = async (api) => {
+  void refreshGlobalOpencodeConfig(api)
+
   const key = getCrofaiKey(api)
   const crofaiProviderID = getCrofaiProviderID(api)
   if (!key || !crofaiProviderID) return
@@ -153,10 +250,6 @@ const tui: TuiPlugin = async (api) => {
 
   await refresh()
   const usageInterval = setInterval(refresh, 30000)
-
-  api.lifecycle.onDispose(() => {
-    clearInterval(usageInterval)
-  })
 
   const onMessageUpdated = async (event: EventMessageUpdated) => {
     refresh()
