@@ -9,6 +9,7 @@ import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
 
 const CROFAI_URL = "https://crof.ai/usage_api/"
+const PRICING_URL = "https://crof.ai/pricing"
 
 const execAsync = promisify(execCb)
 
@@ -41,6 +42,11 @@ async function autoUpdate(): Promise<void> {
 interface UsageData {
   credits: number
   usable_requests: number | null
+}
+
+interface PricingModel {
+  id: string
+  speed?: number
 }
 
 interface ModelsApiModel {
@@ -105,7 +111,18 @@ async function fetchUsage(key: string): Promise<UsageData | null> {
   }
 }
 
-
+async function fetchPricingModels(): Promise<PricingModel[] | null> {
+  try {
+    const res = await fetch(PRICING_URL)
+    if (!res.ok) return null
+    const html = await res.text()
+    const match = html.match(/const allModels = (\[[\s\S]*?\]);/)
+    if (!match) return null
+    return JSON.parse(match[1]) as PricingModel[]
+  } catch {
+    return null
+  }
+}
 
 async function fetchModelsApi(): Promise<ModelsApiModel[] | null> {
   try {
@@ -251,17 +268,17 @@ const tui: TuiPlugin = async (api) => {
 
   const [getData, setData] = createSignal<UsageData | null>(null)
   const [getErr, setErr] = createSignal(false)
-  const [getModels, setModels] = createSignal<ModelsApiModel[]>([])
+  const [getPricingModels, setPricingModels] = createSignal<PricingModel[]>([])
 
   const refresh = async () => {
-    const [result, models] = await Promise.all([fetchUsage(key), fetchModelsApi()])
+    const [result, pricingModels] = await Promise.all([fetchUsage(key), fetchPricingModels()])
     if (result) {
       setData(result)
       setErr(false)
     } else {
       setErr(true)
     }
-    if (models) setModels(models)
+    if (pricingModels) setPricingModels(pricingModels)
   }
 
   await refresh()
@@ -290,7 +307,7 @@ const tui: TuiPlugin = async (api) => {
       sidebar_content(_ctx, props) {
         if (!isCrofaiSession(api, props.session_id, crofaiProviderID)) return null
         const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderID)
-        const tps = modelID ? (getModels().find((model) => model.id === modelID)?.speed ?? null) : null
+        const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
         return buildSidebar(api, getData(), getErr(), tps)
       },
     },
