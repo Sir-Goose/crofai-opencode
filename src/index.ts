@@ -13,7 +13,8 @@ function getCrofaiKey(api: TuiPluginApi): string | undefined {
   const fromEnv = process.env.CROFAI_API_KEY
   if (fromEnv) return fromEnv
   const provider = api.state.provider.find(p => p.name === "CrofAI")
-  return provider?.key
+  if (!provider) return undefined
+  return provider.key || (provider.options?.apiKey as string | undefined)
 }
 
 async function fetchUsage(key: string): Promise<UsageData | null> {
