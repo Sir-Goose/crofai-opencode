@@ -10,11 +10,11 @@ interface UsageData {
 }
 
 function getCrofaiKey(api: TuiPluginApi): string | undefined {
-  const fromEnv = process.env.CROFAI_API_KEY
-  if (fromEnv) return fromEnv
   const provider = api.state.provider.find(p => p.name === "CrofAI")
-  if (!provider) return undefined
-  return provider.key || (provider.options?.apiKey as string | undefined)
+  const fromConfig = provider?.options?.apiKey as string | undefined
+  if (fromConfig) return fromConfig
+  if (provider?.key) return provider.key
+  return process.env.CROFAI_API_KEY
 }
 
 function getCrofaiProviderID(api: TuiPluginApi): string | undefined {
