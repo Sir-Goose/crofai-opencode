@@ -31,7 +31,8 @@ Running `bun install` again keeps the entry up to date and avoids duplicate plug
 
 - Shows `Requests: XXX/day` and `Credits: $X.XXXX`
 - Only appears for sessions actually using a CrofAI model
-- Refreshes every 30 seconds
+- Updates in real-time after every message
+- Falls back to 30-second interval if no messages are sent
 
 ## License
 
