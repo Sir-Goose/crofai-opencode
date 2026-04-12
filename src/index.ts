@@ -3,10 +3,16 @@ import { createSignal } from "solid-js"
 import type { TuiPlugin, TuiPluginModule, TuiPluginApi, EventMessageUpdated, EventSessionUpdated } from "@opencode-ai/plugin/tui"
 
 const CROFAI_URL = "https://crof.ai/usage_api/"
+const PRICING_URL = "https://crof.ai/pricing"
 
 interface UsageData {
   credits: number
   usable_requests: number | null
+}
+
+interface PricingModel {
+  id: string
+  speed?: number
 }
 
 function getCrofaiKey(api: TuiPluginApi): string | undefined {
@@ -35,6 +41,20 @@ function isCrofaiSession(api: TuiPluginApi, sessionID: string, crofaiProviderID:
   return false
 }
 
+function getSessionCrofaiModelID(api: TuiPluginApi, sessionID: string, crofaiProviderID: string): string | undefined {
+  const messages = api.state.session.messages(sessionID)
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message.role === "assistant" && message.providerID === crofaiProviderID) {
+      return message.modelID
+    }
+    if (message.role === "user" && message.model.providerID === crofaiProviderID) {
+      return message.model.modelID
+    }
+  }
+  return undefined
+}
+
 async function fetchUsage(key: string): Promise<UsageData | null> {
   try {
     const res = await fetch(CROFAI_URL, {
@@ -47,7 +67,20 @@ async function fetchUsage(key: string): Promise<UsageData | null> {
   }
 }
 
-function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean) {
+async function fetchPricingModels(): Promise<PricingModel[] | null> {
+  try {
+    const res = await fetch(PRICING_URL)
+    if (!res.ok) return null
+    const html = await res.text()
+    const match = html.match(/const allModels = (\[[\s\S]*?\]);/)
+    if (!match) return null
+    return JSON.parse(match[1]) as PricingModel[]
+  } catch {
+    return null
+  }
+}
+
+function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean, tps: number | null) {
   const t = api.theme.current
 
   const root = createElement("box", {
@@ -88,6 +121,11 @@ function buildSidebar(api: TuiPluginApi, d: UsageData | null, err: boolean) {
     const credLine = createElement("text", { fg: credFg })
     insert(credLine, createTextNode("Credits: $" + d.credits.toFixed(4)))
     insert(root, credLine)
+    if (tps !== null) {
+      const tpsLine = createElement("text", { fg: t.textMuted })
+      insert(tpsLine, createTextNode("Speed: ~" + tps + " t/s"))
+      insert(root, tpsLine)
+    }
   }
 
   return root
@@ -100,11 +138,17 @@ const tui: TuiPlugin = async (api) => {
 
   const [getData, setData] = createSignal<UsageData | null>(null)
   const [getErr, setErr] = createSignal(false)
+  const [getPricingModels, setPricingModels] = createSignal<PricingModel[]>([])
 
   const refresh = async () => {
-    const result = await fetchUsage(key)
-    if (result) { setData(result); setErr(false) }
-    else { setErr(true) }
+    const [result, pricingModels] = await Promise.all([fetchUsage(key), fetchPricingModels()])
+    if (result) {
+      setData(result)
+      setErr(false)
+    } else {
+      setErr(true)
+    }
+    if (pricingModels) setPricingModels(pricingModels)
   }
 
   await refresh()
@@ -136,7 +180,9 @@ const tui: TuiPlugin = async (api) => {
     slots: {
       sidebar_content(_ctx, props) {
         if (!isCrofaiSession(api, props.session_id, crofaiProviderID)) return null
-        return buildSidebar(api, getData(), getErr())
+        const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderID)
+        const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
+        return buildSidebar(api, getData(), getErr(), tps)
       },
     },
   })

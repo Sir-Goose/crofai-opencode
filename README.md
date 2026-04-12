@@ -30,6 +30,7 @@ Running `bun install` again keeps the entry up to date and avoids duplicate plug
 ## Behavior
 
 - Shows `Requests: XXX/day` and `Credits: $X.XXXX`
+- Shows current model speed as `~XX t/s` using data extracted from the CrofAI pricing page HTML
 - Only appears for sessions actually using a CrofAI model
 - Updates in real-time after every message
 - Falls back to 30-second interval if no messages are sent
