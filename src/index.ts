@@ -99,6 +99,14 @@ function getSessionCrofaiModelID(api: TuiPluginApi, sessionID: string, crofaiPro
   return undefined
 }
 
+function formatNum(n: number): string {
+  if (n >= 1e12) return (n / 1e12).toFixed(1).replace(/\.0$/, "") + "t"
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "b"
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "m"
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k"
+  return n.toString()
+}
+
 interface SessionTokens {
   input: number
   output: number
@@ -278,11 +286,7 @@ function buildSidebar(
 
   if (tokens && tokens.total > 0) {
     const tokenLine = createElement("text", { fg: t.info })
-    const parts = []
-    if (tokens.input > 0) parts.push("in:" + tokens.input)
-    if (tokens.output > 0) parts.push("out:" + tokens.output)
-    if (tokens.reasoning > 0) parts.push("r:" + tokens.reasoning)
-    insert(tokenLine, createTextNode("Tokens: " + parts.join(" ")))
+    insert(tokenLine, createTextNode("Tokens: " + formatNum(tokens.total)))
     insert(root, tokenLine)
   }
 
