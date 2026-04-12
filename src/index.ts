@@ -258,7 +258,6 @@ function buildSidebar(
   err: boolean,
   tps: number | null,
   tokens: SessionTokens | null,
-  modelID: string | null,
 ) {
   const t = api.theme.current
 
@@ -277,12 +276,6 @@ function buildSidebar(
   const title = createElement("text", { fg: t.primary })
   insert(title, createTextNode("CrofAI"))
   insert(root, title)
-
-  if (modelID) {
-    const modelLine = createElement("text", { fg: t.textMuted })
-    insert(modelLine, createTextNode("Model: " + modelID))
-    insert(root, modelLine)
-  }
 
   if (tokens && tokens.total > 0) {
     const tokenLine = createElement("text", { fg: t.info })
@@ -373,7 +366,7 @@ const tui: TuiPlugin = async (api) => {
         const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderID)
         const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
         const tokens = getSessionTokens(api, props.session_id)
-        return buildSidebar(api, getData(), getErr(), tps, tokens, modelID ?? null)
+        return buildSidebar(api, getData(), getErr(), tps, tokens)
       },
     },
   })
