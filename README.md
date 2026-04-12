@@ -4,19 +4,13 @@ CrofAI usage stats in the OpenCode sidebar. Shows requests/day and credits.
 
 ## Install
 
-**One command — project-level:**
-
-```bash
-mkdir -p .opencode/plugins && curl -sL https://raw.githubusercontent.com/Red44/crofai-opencode/main/src/index.ts -o .opencode/plugins/crofai-sidebar.ts
-```
-
-**One command — global:**
-
 ```bash
 mkdir -p ~/.config/opencode/plugins && curl -sL https://raw.githubusercontent.com/Red44/crofai-opencode/main/src/index.ts -o ~/.config/opencode/plugins/crofai-sidebar.ts
 ```
 
 That's it. OpenCode loads `.ts` files directly — no build, no `bun install`, no dependencies to manage.
+
+Auto-updates via GitHub API. When a new version is published the plugin downloads it in the background and shows "Updated - restart to apply".
 
 ## Requirements
 
