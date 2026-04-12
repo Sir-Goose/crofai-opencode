@@ -10,16 +10,7 @@ cd crofai-opencode
 bun install
 ```
 
-Then add this to your global `tui.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/tui.json",
-  "plugin": [
-    "/absolute/path/to/crofai-opencode/src/index.ts"
-  ]
-}
-```
+`bun install` automatically registers the plugin in your global OpenCode `tui.json`.
 
 ## Update
 
@@ -27,6 +18,8 @@ Then add this to your global `tui.json`:
 git pull
 bun install
 ```
+
+Running `bun install` again keeps the entry up to date and avoids duplicate plugin entries.
 
 ## Requirements
 
