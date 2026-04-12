@@ -1,6 +1,6 @@
 import { createElement, createTextNode, insert } from "@opentui/solid"
 import { createSignal } from "solid-js"
-import type { TuiPlugin, TuiPluginModule, TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { TuiPlugin, TuiPluginModule, TuiPluginApi, EventMessageUpdated, EventSessionUpdated } from "@opencode-ai/plugin/tui"
 
 const CROFAI_URL = "https://crof.ai/usage_api/"
 
@@ -112,6 +112,23 @@ const tui: TuiPlugin = async (api) => {
 
   api.lifecycle.onDispose(() => {
     clearInterval(usageInterval)
+  })
+
+  const onMessageUpdated = async (event: EventMessageUpdated) => {
+    refresh()
+  }
+
+  const onSessionUpdated = async (event: EventSessionUpdated) => {
+    refresh()
+  }
+
+  const eventUnsub = api.event.on("message.updated.1", onMessageUpdated)
+  const sessionUnsub = api.event.on("session.updated.1", onSessionUpdated)
+
+  api.lifecycle.onDispose(() => {
+    clearInterval(usageInterval)
+    eventUnsub()
+    sessionUnsub()
   })
 
   api.slots.register({
