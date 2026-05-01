@@ -301,6 +301,13 @@ async function refreshGlobalOpencodeConfig(api: TuiPluginApi): Promise<void> {
   const existingCrofai = isObject(provider.CrofAI) ? provider.CrofAI : {}
   const existingOptions = isObject(existingCrofai.options) ? existingCrofai.options : {}
 
+  const existingCrofaiModels = isObject(existingCrofai.models) ? (existingCrofai.models as Record<string, unknown>) : {}
+  const mergedModels: Record<string, unknown> = {}
+  for (const model of models) {
+    const existingModel = isObject(existingCrofaiModels[model.id]) ? (existingCrofaiModels[model.id] as Record<string, unknown>) : {}
+    mergedModels[model.id] = { ...toInstalledModelConfig(model), ...existingModel }
+  }
+
   const nextConfig = {
     ...config,
     $schema: typeof config.$schema === "string" ? config.$schema : OPENCODE_CONFIG_SCHEMA,
@@ -315,7 +322,7 @@ async function refreshGlobalOpencodeConfig(api: TuiPluginApi): Promise<void> {
           ...(typeof existingOptions.apiKey === "string" ? {} : { apiKey: process.env.CROFAI_API_KEY || "{env:CROFAI_API_KEY}" }),
           baseURL: "https://crof.ai/v1",
         },
-        models: Object.fromEntries(models.map((model) => [model.id, toInstalledModelConfig(model)])),
+        models: mergedModels,
       },
     },
   }
