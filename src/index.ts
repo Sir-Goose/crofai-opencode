@@ -1,6 +1,6 @@
 import { createElement, createTextNode, insert } from "@opentui/solid"
 import { createSignal } from "solid-js"
-import type { TuiPlugin, TuiPluginModule, TuiPluginApi, EventMessageUpdated, EventSessionUpdated } from "@opencode-ai/plugin/tui"
+import type { TuiPlugin, TuiPluginModule, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { exec as execCb } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
@@ -116,8 +116,9 @@ interface SessionTokens {
   total: number
 }
 
-function getSessionTokens(api: TuiPluginApi, sessionID: string): SessionTokens {
-  const messages = api.state.session.messages(sessionID)
+type SessionMessage = ReturnType<TuiPluginApi["state"]["session"]["messages"]>[number]
+
+function getTokensFromMessages(messages: ReadonlyArray<SessionMessage>): SessionTokens {
   let input = 0
   let output = 0
   let reasoning = 0
@@ -141,6 +142,85 @@ function getSessionTokens(api: TuiPluginApi, sessionID: string): SessionTokens {
     cacheRead,
     cacheWrite,
     total: input + output + reasoning + cacheRead + cacheWrite,
+  }
+}
+
+function getSessionTokens(api: TuiPluginApi, sessionID: string): SessionTokens {
+  return getTokensFromMessages(api.state.session.messages(sessionID))
+}
+
+function mergeTokens(a: SessionTokens, b: SessionTokens): SessionTokens {
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    reasoning: a.reasoning + b.reasoning,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    total: a.total + b.total,
+  }
+}
+
+function zeroTokens(): SessionTokens {
+  return { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+}
+
+function getResponseData(value: unknown): unknown {
+  if (isObject(value) && "data" in value) return value.data
+  return value
+}
+
+async function callSessionEndpoint<T>(
+  api: TuiPluginApi,
+  method: "children" | "messages",
+  sessionID: string,
+): Promise<T[]> {
+  const sessionClient = api.client.session as unknown as Record<typeof method, (parameters: unknown) => Promise<unknown>>
+
+  try {
+    const result = await sessionClient[method]({ sessionID })
+    const data = getResponseData(result)
+    if (Array.isArray(data)) return data as T[]
+  } catch (_error) {
+    // Older OpenCode SDKs used a generated client shape with path parameters.
+  }
+
+  const result = await sessionClient[method]({ path: { id: sessionID } })
+  const data = getResponseData(result)
+  return Array.isArray(data) ? data as T[] : []
+}
+
+async function getSessionTokensFromClient(api: TuiPluginApi, sessionID: string): Promise<SessionTokens> {
+  const entries = await callSessionEndpoint<{ info?: SessionMessage } | SessionMessage>(api, "messages", sessionID)
+  const messages = entries.map((entry) => isObject(entry) && "info" in entry ? entry.info : entry).filter(Boolean)
+  return getTokensFromMessages(messages as SessionMessage[])
+}
+
+async function collectChildTokens(
+  api: TuiPluginApi,
+  sessionID: string,
+  depth: number = 0,
+  maxDepth: number = 5,
+): Promise<SessionTokens> {
+  if (depth >= maxDepth) return zeroTokens()
+  try {
+    const children = await callSessionEndpoint<{ id?: string }>(api, "children", sessionID)
+    if (!children || children.length === 0) return zeroTokens()
+
+    const acc = zeroTokens()
+    for (const child of children) {
+      if (!child.id) continue
+      const parentTokens = await getSessionTokensFromClient(api, child.id)
+      const childTokens = await collectChildTokens(api, child.id, depth + 1, maxDepth)
+      acc.input += parentTokens.input + childTokens.input
+      acc.output += parentTokens.output + childTokens.output
+      acc.reasoning += parentTokens.reasoning + childTokens.reasoning
+      acc.cacheRead += parentTokens.cacheRead + childTokens.cacheRead
+      acc.cacheWrite += parentTokens.cacheWrite + childTokens.cacheWrite
+    }
+    acc.total = acc.input + acc.output + acc.reasoning + acc.cacheRead + acc.cacheWrite
+    return acc
+  } catch {
+    return zeroTokens()
   }
 }
 
@@ -326,6 +406,27 @@ const tui: TuiPlugin = async (api) => {
   const [getData, setData] = createSignal<UsageData | null>(null)
   const [getErr, setErr] = createSignal(false)
   const [getPricingModels, setPricingModels] = createSignal<PricingModel[]>([])
+  const [getChildTokens, setChildTokens] = createSignal<{
+    sessionID: string
+    tokens: SessionTokens | null
+  } | null>(null)
+  const [getCurrentSessionID, setCurrentSessionID] = createSignal<string | null>(null)
+  let childTokenRefreshSeq = 0
+  const childTokenRefreshInFlight = new Set<string>()
+
+  async function refreshChildTokens(sessionID: string, force: boolean = false): Promise<void> {
+    if (!force && childTokenRefreshInFlight.has(sessionID)) return
+    if (!force && getChildTokens()?.sessionID === sessionID) return
+    const seq = ++childTokenRefreshSeq
+    childTokenRefreshInFlight.add(sessionID)
+    try {
+      const tokens = await collectChildTokens(api, sessionID)
+      if (seq !== childTokenRefreshSeq || getCurrentSessionID() !== sessionID) return
+      setChildTokens({ sessionID, tokens: tokens.total > 0 ? tokens : null })
+    } finally {
+      childTokenRefreshInFlight.delete(sessionID)
+    }
+  }
 
   const refresh = async () => {
     const [result, pricingModels] = await Promise.all([fetchUsage(key), fetchPricingModels()])
@@ -339,14 +440,22 @@ const tui: TuiPlugin = async (api) => {
   }
 
   await refresh()
-  const usageInterval = setInterval(refresh, 30000)
-
-  const onMessageUpdated = async (event: EventMessageUpdated) => {
+  const usageInterval = setInterval(() => {
     refresh()
+    const sid = getCurrentSessionID()
+    if (sid) refreshChildTokens(sid, true)
+  }, 30000)
+
+  const onMessageUpdated = async () => {
+    refresh()
+    const sid = getCurrentSessionID()
+    if (sid) refreshChildTokens(sid, true)
   }
 
-  const onSessionUpdated = async (event: EventSessionUpdated) => {
+  const onSessionUpdated = async () => {
     refresh()
+    const sid = getCurrentSessionID()
+    if (sid) refreshChildTokens(sid, true)
   }
 
   const eventUnsub = api.event.on("message.updated.1", onMessageUpdated)
@@ -363,10 +472,16 @@ const tui: TuiPlugin = async (api) => {
     slots: {
       sidebar_content(_ctx, props) {
         if (!isCrofaiSession(api, props.session_id, crofaiProviderID)) return null
+        setCurrentSessionID(props.session_id)
+        refreshChildTokens(props.session_id)
         const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderID)
         const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
-        const tokens = getSessionTokens(api, props.session_id)
-        return buildSidebar(api, getData(), getErr(), tps, tokens)
+        const parentTokens = getSessionTokens(api, props.session_id)
+        const childTokens = getChildTokens()
+        const allTokens = childTokens?.sessionID === props.session_id && childTokens.tokens
+          ? mergeTokens(parentTokens, childTokens.tokens)
+          : parentTokens
+        return buildSidebar(api, getData(), getErr(), tps, allTokens)
       },
     },
   })
