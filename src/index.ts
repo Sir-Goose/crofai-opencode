@@ -435,42 +435,50 @@ const tui: TuiPlugin = async (api) => {
     }
   }
 
+  let usageRefreshInFlight = false
+  let usageRefreshQueued = false
+
   const refresh = async () => {
-    const [result, pricingModels] = await Promise.all([fetchUsage(key), fetchPricingModels()])
-    if (result) {
-      setData(result)
-      setErr(false)
-    } else {
-      setErr(true)
+    if (usageRefreshInFlight) {
+      usageRefreshQueued = true
+      return
     }
-    if (pricingModels) setPricingModels(pricingModels)
+    usageRefreshInFlight = true
+    try {
+      const [result, pricingModels] = await Promise.all([fetchUsage(key), fetchPricingModels()])
+      if (result) {
+        setData(result)
+        setErr(false)
+      } else {
+        setErr(true)
+      }
+      if (pricingModels) setPricingModels(pricingModels)
+    } finally {
+      usageRefreshInFlight = false
+      if (usageRefreshQueued) {
+        usageRefreshQueued = false
+        void refresh()
+      }
+    }
   }
 
-  await refresh()
+  void refresh()
   const usageInterval = setInterval(() => {
-    refresh()
+    void refresh()
     const sid = getCurrentSessionID()
     if (sid) refreshChildTokens(sid, true)
   }, 30000)
 
-  const onMessageUpdated = async () => {
-    refresh()
-    const sid = getCurrentSessionID()
-    if (sid) refreshChildTokens(sid, true)
-  }
-
   const onSessionUpdated = async () => {
-    refresh()
+    void refresh()
     const sid = getCurrentSessionID()
     if (sid) refreshChildTokens(sid, true)
   }
 
-  const eventUnsub = api.event.on("message.updated.1", onMessageUpdated)
   const sessionUnsub = api.event.on("session.updated.1", onSessionUpdated)
 
   api.lifecycle.onDispose(() => {
     clearInterval(usageInterval)
-    eventUnsub()
     sessionUnsub()
   })
 
