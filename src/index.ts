@@ -1,3 +1,4 @@
+import { TextAttributes } from "@opentui/core"
 import { createElement, createTextNode, insert } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import type { TuiPlugin, TuiPluginModule, TuiPluginApi } from "@opencode-ai/plugin/tui"
@@ -544,58 +545,67 @@ function buildSidebar(
 ) {
   const t = api.theme.current
 
-  const root = createElement("box", {
-    border: true,
-    borderColor: t.border,
-    backgroundColor: t.backgroundPanel,
-    paddingTop: 1,
-    paddingBottom: 1,
-    paddingLeft: 2,
-    paddingRight: 2,
-    flexDirection: "column",
-    gap: 1,
-  })
+  const root = createElement("box")
+  root.border = true
+  root.borderColor = t.border
+  root.backgroundColor = t.backgroundPanel
+  root.paddingTop = 1
+  root.paddingBottom = 1
+  root.paddingLeft = 2
+  root.paddingRight = 2
+  root.flexDirection = "column"
+  root.gap = 1
 
-  const title = createElement("text", { fg: t.primary })
+  const title = createElement("text")
+  title.fg = t.text
+  title.attributes = TextAttributes.BOLD
   insert(title, createTextNode("CrofAI"))
   insert(root, title)
 
   if (tokens && tokens.total > 0) {
-    const tokenLine = createElement("text", { fg: t.info })
+    const tokenLine = createElement("text")
+    tokenLine.fg = t.textMuted
     insert(tokenLine, createTextNode("Tokens: " + formatNum(tokens.total)))
     insert(root, tokenLine)
   }
   if (childTokens && childTokens.total > 0) {
-    const childLine = createElement("text", { fg: t.info })
+    const childLine = createElement("text")
+    childLine.fg = t.textMuted
     insert(childLine, createTextNode("Subsessions: " + formatNum(childTokens.total)))
     insert(root, childLine)
   }
 
   if (err) {
-    const errText = createElement("text", { fg: t.error })
+    const errText = createElement("text")
+    errText.fg = t.error
     insert(errText, createTextNode("Failed to fetch usage"))
     insert(root, errText)
   } else if (!d) {
-    const loadingText = createElement("text", { fg: t.textMuted })
+    const loadingText = createElement("text")
+    loadingText.fg = t.textMuted
     insert(loadingText, createTextNode("Loading..."))
     insert(root, loadingText)
   } else {
     if (d.usable_requests !== null) {
-      const reqLine = createElement("text", { fg: t.info })
+      const reqLine = createElement("text")
+      reqLine.fg = t.textMuted
       insert(reqLine, createTextNode("Requests: " + d.usable_requests + "/day"))
       insert(root, reqLine)
     } else {
-      const planText = createElement("text", { fg: t.textMuted })
+      const planText = createElement("text")
+      planText.fg = t.textMuted
       insert(planText, createTextNode("Pay-per-token"))
       insert(root, planText)
     }
     if (tps !== null) {
-      const tpsLine = createElement("text", { fg: t.textMuted })
+      const tpsLine = createElement("text")
+      tpsLine.fg = t.textMuted
       insert(tpsLine, createTextNode("Speed: ~" + tps + " t/s"))
       insert(root, tpsLine)
     }
     const credFg = d.credits < 0 ? t.error : t.success
-    const credLine = createElement("text", { fg: credFg })
+    const credLine = createElement("text")
+    credLine.fg = credFg
     insert(credLine, createTextNode("Credits: $" + d.credits.toFixed(4)))
     insert(root, credLine)
   }
