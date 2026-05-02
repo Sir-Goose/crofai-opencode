@@ -57,11 +57,17 @@ interface ModelsApiModel {
   id: string
   context_length: number | string
   max_completion_tokens: number | string
+  custom_reasoning?: boolean
+  reasoning?: boolean
   speed?: number
 }
 
+type ModelConfig = Record<string, unknown>
+
 const OPENCODE_CONFIG_PATH = path.join(os.homedir(), ".config", "opencode", "opencode.json")
 const OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
+const DEEPSEEK_THINKING_EFFORTS = ["high", "max"] as const
+const DEEPSEEK_DISABLED_THINKING_EFFORTS = ["low", "medium", "xhigh"] as const
 
 function getCrofaiKey(api: TuiPluginApi): string | undefined {
   const provider = api.state.provider.find(p => p.name === "CrofAI")
@@ -298,12 +304,39 @@ function sortForJson(value: unknown): unknown {
   )
 }
 
-function toInstalledModelConfig(model: ModelsApiModel) {
+function modelSupportsReasoning(model: ModelsApiModel): boolean {
+  return model.custom_reasoning === true || model.reasoning === true
+}
+
+function modelUsesDeepSeekThinking(model: ModelsApiModel): boolean {
+  return modelSupportsReasoning(model) && model.id.toLowerCase().includes("deepseek-v4")
+}
+
+function toReasoningVariants(model: ModelsApiModel): Record<string, unknown> | undefined {
+  if (!modelUsesDeepSeekThinking(model)) return undefined
+
+  const variants = Object.fromEntries(
+    DEEPSEEK_THINKING_EFFORTS.map((effort) => [effort, {
+      reasoningEffort: effort,
+      thinking: { type: "enabled" },
+    }]),
+  )
+  for (const effort of DEEPSEEK_DISABLED_THINKING_EFFORTS) {
+    variants[effort] = { disabled: true }
+  }
+  return variants
+}
+
+function toInstalledModelConfig(model: ModelsApiModel): ModelConfig {
   const context = Number(model.context_length)
   const output = Number(model.max_completion_tokens)
+  const reasoning = modelSupportsReasoning(model)
+  const variants = toReasoningVariants(model)
 
   return {
     name: `CrofAI: ${model.id}`,
+    ...(reasoning ? { reasoning: true } : {}),
+    ...(variants ? { variants } : {}),
     limit: {
       context: Number.isFinite(context) ? context : 0,
       output: Number.isFinite(output) ? output : 0,
@@ -311,9 +344,37 @@ function toInstalledModelConfig(model: ModelsApiModel) {
   }
 }
 
-async function refreshGlobalOpencodeConfig(): Promise<boolean> {
+function mergeVariantConfig(generated: unknown, existing: unknown): unknown {
+  if (!isObject(generated)) return existing ?? generated
+  if (!isObject(existing)) return generated
+
+  const merged: Record<string, unknown> = { ...generated, ...existing }
+  for (const [key, generatedVariant] of Object.entries(generated)) {
+    const existingVariant = existing[key]
+    if (isObject(generatedVariant) && isObject(existingVariant)) {
+      merged[key] = { ...generatedVariant, ...existingVariant }
+    }
+  }
+  return merged
+}
+
+function mergeModelConfig(generated: ModelConfig, existing: ModelConfig): ModelConfig {
+  const merged = { ...generated, ...existing }
+  if ("variants" in generated) {
+    merged.variants = mergeVariantConfig(generated.variants, existing.variants)
+  }
+  return merged
+}
+
+interface ModelRefreshResult {
+  changed: boolean
+  models: ModelsApiModel[]
+  installedModels: Record<string, unknown>
+}
+
+async function refreshGlobalOpencodeConfig(): Promise<ModelRefreshResult | null> {
   const models = await fetchModelsApi()
-  if (!models) return false
+  if (!models) return null
 
   const config = readOpencodeConfig()
   const provider = isObject(config.provider) ? config.provider : {}
@@ -324,7 +385,7 @@ async function refreshGlobalOpencodeConfig(): Promise<boolean> {
   const mergedModels: Record<string, unknown> = {}
   for (const model of models) {
     const existingModel = isObject(existingCrofaiModels[model.id]) ? (existingCrofaiModels[model.id] as Record<string, unknown>) : {}
-    mergedModels[model.id] = { ...toInstalledModelConfig(model), ...existingModel }
+    mergedModels[model.id] = mergeModelConfig(toInstalledModelConfig(model), existingModel)
   }
 
   const nextConfig = {
@@ -349,9 +410,35 @@ async function refreshGlobalOpencodeConfig(): Promise<boolean> {
   fs.mkdirSync(path.dirname(OPENCODE_CONFIG_PATH), { recursive: true })
   const before = stableStringify(config)
   const after = stableStringify(nextConfig)
-  if (before === after) return false
+  if (before === after) return { changed: false, models, installedModels: mergedModels }
   fs.writeFileSync(OPENCODE_CONFIG_PATH, after)
-  return true
+  return { changed: true, models, installedModels: mergedModels }
+}
+
+function liveProviderNeedsModelReload(api: TuiPluginApi, installedModels: Record<string, unknown>): boolean {
+  const provider = api.state.provider.find((item) => item.name === "CrofAI")
+  if (!provider) return false
+  const liveModels = isObject(provider.models) ? provider.models : {}
+
+  for (const [modelID, installedModel] of Object.entries(installedModels)) {
+    if (!isObject(installedModel)) continue
+    const liveModel = liveModels[modelID]
+    if (!isObject(liveModel)) continue
+    if (!liveModel) continue
+
+    const capabilities = isObject(liveModel.capabilities) ? liveModel.capabilities : {}
+    if (installedModel.reasoning === true && capabilities.reasoning !== true) return true
+
+    const installedVariants = isObject(installedModel.variants) ? installedModel.variants : undefined
+    if (!installedVariants) continue
+
+    const liveVariants = isObject(liveModel.variants) ? liveModel.variants : {}
+    for (const variantID of Object.keys(installedVariants)) {
+      if (!(variantID in liveVariants)) return true
+    }
+  }
+
+  return false
 }
 
 function buildSidebar(
@@ -463,8 +550,8 @@ const tui: TuiPlugin = async (api) => {
     if (modelRefreshInFlight || disposed) return
     modelRefreshInFlight = true
     try {
-      const changed = await refreshGlobalOpencodeConfig()
-      if (changed) {
+      const result = await refreshGlobalOpencodeConfig()
+      if (result && (result.changed || liveProviderNeedsModelReload(api, result.installedModels))) {
         pendingModelReload = true
         scheduleModelReload()
       }

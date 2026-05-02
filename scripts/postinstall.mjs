@@ -11,6 +11,8 @@ const pluginPath = path.resolve(process.cwd(), "src", "index.ts")
 const tuiSchema = "https://opencode.ai/tui.json"
 const opencodeSchema = "https://opencode.ai/config.json"
 const modelsURL = "https://crof.ai/v1/models"
+const deepseekThinkingEfforts = ["high", "max"]
+const deepseekDisabledThinkingEfforts = ["low", "medium", "xhigh"]
 
 const oldPluginPatterns = [
   /crofai-sidebar\.ts$/,
@@ -56,6 +58,51 @@ function normalizeOpencodeConfig(raw) {
 
 function shouldReplacePlugin(entry) {
   return oldPluginPatterns.some((pattern) => pattern.test(entry))
+}
+
+function modelSupportsReasoning(model) {
+  return model.custom_reasoning === true || model.reasoning === true
+}
+
+function modelUsesDeepSeekThinking(model) {
+  return modelSupportsReasoning(model) && model.id.toLowerCase().includes("deepseek-v4")
+}
+
+function toReasoningVariants(model) {
+  if (!modelUsesDeepSeekThinking(model)) return undefined
+
+  const variants = Object.fromEntries(
+    deepseekThinkingEfforts.map((effort) => [effort, {
+      reasoningEffort: effort,
+      thinking: { type: "enabled" },
+    }]),
+  )
+  for (const effort of deepseekDisabledThinkingEfforts) {
+    variants[effort] = { disabled: true }
+  }
+  return variants
+}
+
+function mergeVariantConfig(generated, existing) {
+  if (!isObject(generated)) return existing ?? generated
+  if (!isObject(existing)) return generated
+
+  const merged = { ...generated, ...existing }
+  for (const [key, generatedVariant] of Object.entries(generated)) {
+    const existingVariant = existing[key]
+    if (isObject(generatedVariant) && isObject(existingVariant)) {
+      merged[key] = { ...generatedVariant, ...existingVariant }
+    }
+  }
+  return merged
+}
+
+function mergeModelConfig(generated, existing) {
+  const merged = { ...generated, ...existing }
+  if ("variants" in generated) {
+    merged.variants = mergeVariantConfig(generated.variants, existing.variants)
+  }
+  return merged
 }
 
 function updateTuiConfig() {
@@ -107,9 +154,13 @@ async function fetchModels() {
 function toModelConfig(model) {
   const context = Number(model.context_length)
   const output = Number(model.max_completion_tokens)
+  const reasoning = modelSupportsReasoning(model)
+  const variants = toReasoningVariants(model)
 
   return {
     name: `CrofAI: ${model.id}`,
+    ...(reasoning ? { reasoning: true } : {}),
+    ...(variants ? { variants } : {}),
     limit: {
       context: Number.isFinite(context) ? context : 0,
       output: Number.isFinite(output) ? output : 0,
@@ -130,7 +181,7 @@ async function updateOpencodeConfig() {
 
   const providerModels = Object.fromEntries(models.map((model) => {
     const existingModel = isObject(existingModels[model.id]) ? existingModels[model.id] : {}
-    return [model.id, { ...toModelConfig(model), ...existingModel }]
+    return [model.id, mergeModelConfig(toModelConfig(model), existingModel)]
   }))
 
   config.provider.CrofAI = {
