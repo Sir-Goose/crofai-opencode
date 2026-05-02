@@ -540,6 +540,7 @@ function buildSidebar(
   err: boolean,
   tps: number | null,
   tokens: SessionTokens | null,
+  childTokens: SessionTokens | null,
 ) {
   const t = api.theme.current
 
@@ -563,6 +564,11 @@ function buildSidebar(
     const tokenLine = createElement("text", { fg: t.info })
     insert(tokenLine, createTextNode("Tokens: " + formatNum(tokens.total)))
     insert(root, tokenLine)
+  }
+  if (childTokens && childTokens.total > 0) {
+    const childLine = createElement("text", { fg: t.info })
+    insert(childLine, createTextNode("Subsessions: " + formatNum(childTokens.total)))
+    insert(root, childLine)
   }
 
   if (err) {
@@ -769,10 +775,14 @@ const tui: TuiPlugin = async (api) => {
         const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
         const parentTokens = getSessionTokens(api, props.session_id)
         const childTokens = getChildTokens()
-        const allTokens = childTokens?.sessionID === props.session_id && childTokens.tokens
-          ? mergeTokens(parentTokens, childTokens.tokens)
-          : parentTokens
-        return buildSidebar(api, getData(), getErr(), tps, allTokens)
+        return buildSidebar(
+          api,
+          getData(),
+          getErr(),
+          tps,
+          parentTokens,
+          childTokens?.sessionID === props.session_id ? childTokens.tokens : null,
+        )
       },
     },
   })
