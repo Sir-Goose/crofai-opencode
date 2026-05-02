@@ -5,7 +5,7 @@ CrofAI usage stats in the OpenCode sidebar. Shows requests/day and credits.
 ## Install
 
 ```bash
-git clone https://github.com/Red44/crofai-opencode.git
+git clone https://github.com/Sir-Goose/crofai-opencode.git
 cd crofai-opencode
 bun install
 ```
