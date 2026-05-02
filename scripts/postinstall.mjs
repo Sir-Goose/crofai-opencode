@@ -156,10 +156,12 @@ function toModelConfig(model) {
   const output = Number(model.max_completion_tokens)
   const reasoning = modelSupportsReasoning(model)
   const variants = toReasoningVariants(model)
+  const deepseekThinking = modelUsesDeepSeekThinking(model)
 
   return {
     name: `CrofAI: ${model.id}`,
     ...(reasoning ? { reasoning: true } : {}),
+    ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
     ...(variants ? { variants } : {}),
     limit: {
       context: Number.isFinite(context) ? context : 0,

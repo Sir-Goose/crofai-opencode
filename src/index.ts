@@ -11,9 +11,11 @@ import { fileURLToPath } from "node:url"
 const CROFAI_URL = "https://crof.ai/usage_api/"
 const PRICING_URL = "https://crof.ai/pricing"
 const MODELS_URL = "https://crof.ai/v1/models"
+const CROFAI_CHAT_COMPLETIONS_URL = "https://crof.ai/v1/chat/completions"
 const MODEL_REFRESH_INTERVAL_MS = 30 * 60 * 1000
 const MODEL_RELOAD_IDLE_MS = 1500
 const MODEL_RELOAD_STARTUP_GRACE_MS = 3000
+const CROFAI_FETCH_PATCH_KEY = Symbol.for("crofai.opencode.fetchPatch")
 
 const execAsync = promisify(execCb)
 
@@ -63,6 +65,10 @@ interface ModelsApiModel {
 }
 
 type ModelConfig = Record<string, unknown>
+type FetchPatchState = {
+  originalFetch: typeof fetch
+  refs: number
+}
 
 const OPENCODE_CONFIG_PATH = path.join(os.homedir(), ".config", "opencode", "opencode.json")
 const OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
@@ -332,10 +338,12 @@ function toInstalledModelConfig(model: ModelsApiModel): ModelConfig {
   const output = Number(model.max_completion_tokens)
   const reasoning = modelSupportsReasoning(model)
   const variants = toReasoningVariants(model)
+  const deepseekThinking = modelUsesDeepSeekThinking(model)
 
   return {
     name: `CrofAI: ${model.id}`,
     ...(reasoning ? { reasoning: true } : {}),
+    ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
     ...(variants ? { variants } : {}),
     limit: {
       context: Number.isFinite(context) ? context : 0,
@@ -433,12 +441,97 @@ function liveProviderNeedsModelReload(api: TuiPluginApi, installedModels: Record
     if (!installedVariants) continue
 
     const liveVariants = isObject(liveModel.variants) ? liveModel.variants : {}
-    for (const variantID of Object.keys(installedVariants)) {
+    for (const [variantID, installedVariant] of Object.entries(installedVariants)) {
+      if (isObject(installedVariant) && installedVariant.disabled === true) continue
       if (!(variantID in liveVariants)) return true
     }
   }
 
   return false
+}
+
+function getFetchUrl(input: Parameters<typeof fetch>[0]): string | undefined {
+  if (typeof input === "string") return input
+  if (input instanceof URL) return input.toString()
+  if (typeof Request !== "undefined" && input instanceof Request) return input.url
+  if (isObject(input) && typeof input.url === "string") return input.url
+  return undefined
+}
+
+function isCrofaiChatCompletionUrl(value: string | undefined): boolean {
+  if (!value) return false
+  try {
+    const url = new URL(value)
+    return url.origin === "https://crof.ai" && url.pathname === "/v1/chat/completions"
+  } catch (_error) {
+    return value.startsWith(CROFAI_CHAT_COMPLETIONS_URL)
+  }
+}
+
+function createCrofaiReasoningTransform(): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+  const needle = "\"reasoning_content\""
+  const replacement = "\"reasoning_text\""
+  const carryLength = needle.length - 1
+  let carry = ""
+
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      const text = carry + decoder.decode(chunk, { stream: true })
+      const emitLength = Math.max(0, text.length - carryLength)
+      const emit = text.slice(0, emitLength).replaceAll(needle, replacement)
+      carry = text.slice(emitLength)
+      if (emit) controller.enqueue(encoder.encode(emit))
+    },
+    flush(controller) {
+      const tail = (carry + decoder.decode()).replaceAll(needle, replacement)
+      if (tail) controller.enqueue(encoder.encode(tail))
+    },
+  })
+}
+
+function installCrofaiReasoningStreamPatch(): () => void {
+  const globalWithPatch = globalThis as typeof globalThis & { [CROFAI_FETCH_PATCH_KEY]?: FetchPatchState }
+  let state = globalWithPatch[CROFAI_FETCH_PATCH_KEY]
+
+  if (!state) {
+    state = {
+      originalFetch: globalThis.fetch.bind(globalThis),
+      refs: 0,
+    }
+
+    const patchedFetch: typeof fetch = async (input, init) => {
+      const response = await state.originalFetch(input, init)
+      const contentType = response.headers.get("content-type") ?? ""
+      if (
+        !response.body ||
+        !isCrofaiChatCompletionUrl(getFetchUrl(input)) ||
+        !contentType.toLowerCase().includes("text/event-stream")
+      ) {
+        return response
+      }
+
+      return new Response(response.body.pipeThrough(createCrofaiReasoningTransform()), {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      })
+    }
+
+    globalWithPatch[CROFAI_FETCH_PATCH_KEY] = state
+    globalThis.fetch = patchedFetch
+  }
+
+  state.refs += 1
+  return () => {
+    const current = globalWithPatch[CROFAI_FETCH_PATCH_KEY]
+    if (!current) return
+    current.refs -= 1
+    if (current.refs > 0) return
+    globalThis.fetch = current.originalFetch
+    delete globalWithPatch[CROFAI_FETCH_PATCH_KEY]
+  }
 }
 
 function buildSidebar(
@@ -506,6 +599,7 @@ function buildSidebar(
 
 const tui: TuiPlugin = async (api) => {
   void autoUpdate()
+  const uninstallReasoningStreamPatch = installCrofaiReasoningStreamPatch()
 
   const activeSessions = new Set<string>()
   const startedAt = Date.now()
@@ -579,6 +673,7 @@ const tui: TuiPlugin = async (api) => {
   if (!key || !crofaiProviderID) {
     api.lifecycle.onDispose(() => {
       disposed = true
+      uninstallReasoningStreamPatch()
       clearInterval(modelRefreshInterval)
       clearModelReloadTimer()
       sessionStatusUnsub()
@@ -655,6 +750,7 @@ const tui: TuiPlugin = async (api) => {
 
   api.lifecycle.onDispose(() => {
     disposed = true
+    uninstallReasoningStreamPatch()
     clearInterval(modelRefreshInterval)
     clearModelReloadTimer()
     clearInterval(usageInterval)
