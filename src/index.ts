@@ -546,15 +546,13 @@ function buildSidebar(
   const t = api.theme.current
 
   const root = createElement("box")
-  root.border = true
-  root.borderColor = t.border
   root.backgroundColor = t.backgroundPanel
-  root.paddingTop = 1
-  root.paddingBottom = 1
-  root.paddingLeft = 2
-  root.paddingRight = 2
+  root.paddingTop = 0
+  root.paddingBottom = 0
+  root.paddingLeft = 0
+  root.paddingRight = 0
   root.flexDirection = "column"
-  root.gap = 1
+  root.gap = 0
 
   const title = createElement("text")
   title.fg = t.text
