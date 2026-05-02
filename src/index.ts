@@ -563,13 +563,13 @@ function buildSidebar(
   if (tokens && tokens.total > 0) {
     const tokenLine = createElement("text")
     tokenLine.fg = t.textMuted
-    insert(tokenLine, createTextNode("Tokens: " + formatNum(tokens.total)))
+    insert(tokenLine, createTextNode(formatNum(tokens.total) + " tokens"))
     insert(root, tokenLine)
   }
   if (childTokens && childTokens.total > 0) {
     const childLine = createElement("text")
     childLine.fg = t.textMuted
-    insert(childLine, createTextNode("Subsessions: " + formatNum(childTokens.total)))
+    insert(childLine, createTextNode(formatNum(childTokens.total) + " tokens (sub)"))
     insert(root, childLine)
   }
 
@@ -587,7 +587,7 @@ function buildSidebar(
     if (d.usable_requests !== null) {
       const reqLine = createElement("text")
       reqLine.fg = t.textMuted
-      insert(reqLine, createTextNode("Requests: " + d.usable_requests + "/day"))
+      insert(reqLine, createTextNode(d.usable_requests + " requests remaining"))
       insert(root, reqLine)
     } else {
       const planText = createElement("text")
@@ -598,13 +598,13 @@ function buildSidebar(
     if (tps !== null) {
       const tpsLine = createElement("text")
       tpsLine.fg = t.textMuted
-      insert(tpsLine, createTextNode("Speed: ~" + tps + " t/s"))
+      insert(tpsLine, createTextNode("~" + tps + " t/s"))
       insert(root, tpsLine)
     }
     const credFg = d.credits < 0 ? t.error : t.success
     const credLine = createElement("text")
     credLine.fg = credFg
-    insert(credLine, createTextNode("Credits: $" + d.credits.toFixed(4)))
+    insert(credLine, createTextNode("$" + d.credits.toFixed(4) + " credits"))
     insert(root, credLine)
   }
 
