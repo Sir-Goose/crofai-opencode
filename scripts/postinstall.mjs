@@ -122,12 +122,16 @@ async function updateOpencodeConfig() {
   const models = await fetchModels()
   const existingProvider = isObject(config.provider.CrofAI) ? config.provider.CrofAI : {}
   const existingOptions = isObject(existingProvider.options) ? existingProvider.options : {}
+  const existingModels = isObject(existingProvider.models) ? existingProvider.models : {}
 
   const apiKey = typeof existingOptions.apiKey === "string"
     ? existingOptions.apiKey
     : (process.env.CROFAI_API_KEY || "{env:CROFAI_API_KEY}")
 
-  const providerModels = Object.fromEntries(models.map((model) => [model.id, toModelConfig(model)]))
+  const providerModels = Object.fromEntries(models.map((model) => {
+    const existingModel = isObject(existingModels[model.id]) ? existingModels[model.id] : {}
+    return [model.id, { ...toModelConfig(model), ...existingModel }]
+  }))
 
   config.provider.CrofAI = {
     ...existingProvider,

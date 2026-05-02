@@ -12,7 +12,7 @@ bun install
 
 `bun install` automatically registers the plugin in your global OpenCode `tui.json`.
 It also configures the global OpenCode `opencode.json` CrofAI provider automatically using the live `https://crof.ai/v1/models` API.
-On plugin startup it also performs a best-effort live refresh of the running OpenCode config, so newly fetched CrofAI models can apply without a restart.
+On plugin startup it refreshes CrofAI models in the background and applies newly fetched models when OpenCode is idle, so active responses keep streaming without interruption.
 
 ## Updating
 
@@ -33,7 +33,7 @@ On every OpenCode start the plugin runs `git pull --ff-only` in the background. 
 - Only appears for sessions that already have CrofAI message history
 - Updates in real-time after every message
 - Falls back to 30-second interval if no messages are sent
-- Refreshes the CrofAI model list from `/v1/models` and pushes a best-effort live config update on plugin startup
+- Refreshes the CrofAI model list from `/v1/models` on startup and every 30 minutes, then applies changes when OpenCode is idle
 - Auto-updates from git on every OpenCode start (non-blocking)
 
 ## License

@@ -10,6 +10,10 @@ import { fileURLToPath } from "node:url"
 
 const CROFAI_URL = "https://crof.ai/usage_api/"
 const PRICING_URL = "https://crof.ai/pricing"
+const MODELS_URL = "https://crof.ai/v1/models"
+const MODEL_REFRESH_INTERVAL_MS = 30 * 60 * 1000
+const MODEL_RELOAD_IDLE_MS = 1500
+const MODEL_RELOAD_STARTUP_GRACE_MS = 3000
 
 const execAsync = promisify(execCb)
 
@@ -251,7 +255,7 @@ async function fetchPricingModels(): Promise<PricingModel[] | null> {
 
 async function fetchModelsApi(): Promise<ModelsApiModel[] | null> {
   try {
-    const res = await fetch(`${CROFAI_URL.replace("/usage_api/", "/v1/models")}`)
+    const res = await fetch(MODELS_URL)
     if (!res.ok) return null
     const data = await res.json()
     if (!Array.isArray(data.data)) return null
@@ -279,6 +283,21 @@ function readOpencodeConfig(): Record<string, unknown> {
   }
 }
 
+function stableStringify(value: unknown): string {
+  return JSON.stringify(sortForJson(value), null, 2) + "\n"
+}
+
+function sortForJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortForJson)
+  if (!isObject(value)) return value
+
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, sortForJson(value[key])]),
+  )
+}
+
 function toInstalledModelConfig(model: ModelsApiModel) {
   const context = Number(model.context_length)
   const output = Number(model.max_completion_tokens)
@@ -292,9 +311,9 @@ function toInstalledModelConfig(model: ModelsApiModel) {
   }
 }
 
-async function refreshGlobalOpencodeConfig(api: TuiPluginApi): Promise<void> {
+async function refreshGlobalOpencodeConfig(): Promise<boolean> {
   const models = await fetchModelsApi()
-  if (!models) return
+  if (!models) return false
 
   const config = readOpencodeConfig()
   const provider = isObject(config.provider) ? config.provider : {}
@@ -328,15 +347,11 @@ async function refreshGlobalOpencodeConfig(api: TuiPluginApi): Promise<void> {
   }
 
   fs.mkdirSync(path.dirname(OPENCODE_CONFIG_PATH), { recursive: true })
-  fs.writeFileSync(OPENCODE_CONFIG_PATH, JSON.stringify(nextConfig, null, 2) + "\n")
-
-  try {
-    await api.client.global.config.update({
-      config: nextConfig,
-    })
-  } catch (_error) {
-    // file update already succeeded; live runtime update is best-effort
-  }
+  const before = stableStringify(config)
+  const after = stableStringify(nextConfig)
+  if (before === after) return false
+  fs.writeFileSync(OPENCODE_CONFIG_PATH, after)
+  return true
 }
 
 function buildSidebar(
@@ -403,12 +418,86 @@ function buildSidebar(
 }
 
 const tui: TuiPlugin = async (api) => {
-  void refreshGlobalOpencodeConfig(api)
   void autoUpdate()
+
+  const activeSessions = new Set<string>()
+  const startedAt = Date.now()
+  let pendingModelReload = false
+  let modelReloadTimer: ReturnType<typeof setTimeout> | undefined
+  let modelRefreshInFlight = false
+  let disposed = false
+
+  function hasActiveSession(): boolean {
+    return activeSessions.size > 0
+  }
+
+  function clearModelReloadTimer(): void {
+    if (!modelReloadTimer) return
+    clearTimeout(modelReloadTimer)
+    modelReloadTimer = undefined
+  }
+
+  function scheduleModelReload(): void {
+    if (!pendingModelReload || disposed) return
+    clearModelReloadTimer()
+
+    const startupDelay = Math.max(0, MODEL_RELOAD_STARTUP_GRACE_MS - (Date.now() - startedAt))
+    const delay = Math.max(MODEL_RELOAD_IDLE_MS, startupDelay)
+    modelReloadTimer = setTimeout(() => {
+      modelReloadTimer = undefined
+      if (disposed || !pendingModelReload) return
+      if (hasActiveSession()) {
+        scheduleModelReload()
+        return
+      }
+
+      pendingModelReload = false
+      void api.client.global.dispose().catch(() => {
+        pendingModelReload = true
+        scheduleModelReload()
+      })
+    }, delay)
+  }
+
+  async function refreshModels(): Promise<void> {
+    if (modelRefreshInFlight || disposed) return
+    modelRefreshInFlight = true
+    try {
+      const changed = await refreshGlobalOpencodeConfig()
+      if (changed) {
+        pendingModelReload = true
+        scheduleModelReload()
+      }
+    } finally {
+      modelRefreshInFlight = false
+    }
+  }
+
+  void refreshModels()
+  const modelRefreshInterval = setInterval(() => {
+    void refreshModels()
+  }, MODEL_REFRESH_INTERVAL_MS)
+
+  const sessionStatusUnsub = api.event.on("session.status", (event) => {
+    if (event.properties.status.type === "idle") {
+      activeSessions.delete(event.properties.sessionID)
+    } else {
+      activeSessions.add(event.properties.sessionID)
+    }
+    scheduleModelReload()
+  })
 
   const key = getCrofaiKey(api)
   const crofaiProviderID = getCrofaiProviderID(api)
-  if (!key || !crofaiProviderID) return
+  if (!key || !crofaiProviderID) {
+    api.lifecycle.onDispose(() => {
+      disposed = true
+      clearInterval(modelRefreshInterval)
+      clearModelReloadTimer()
+      sessionStatusUnsub()
+    })
+    return
+  }
 
   const [getData, setData] = createSignal<UsageData | null>(null)
   const [getErr, setErr] = createSignal(false)
@@ -478,7 +567,11 @@ const tui: TuiPlugin = async (api) => {
   const sessionUnsub = api.event.on("session.updated.1", onSessionUpdated)
 
   api.lifecycle.onDispose(() => {
+    disposed = true
+    clearInterval(modelRefreshInterval)
+    clearModelReloadTimer()
     clearInterval(usageInterval)
+    sessionStatusUnsub()
     sessionUnsub()
   })
 
