@@ -137,21 +137,21 @@ function updateTuiConfig() {
   })
 }
 
-async function fetchModels() {
-  const res = await fetch(modelsURL)
+async function fetchModels(url = modelsURL) {
+  const res = await fetch(url)
   if (!res.ok) {
-    throw new Error(`Failed to fetch CrofAI models: ${res.status}`)
+    throw new Error(`Failed to fetch models from ${url}: ${res.status}`)
   }
 
   const data = await res.json()
   if (!Array.isArray(data.data)) {
-    throw new Error("Unexpected CrofAI /v1/models response")
+    throw new Error(`Unexpected /v1/models response from ${url}`)
   }
 
   return data.data
 }
 
-function toModelConfig(model) {
+function toModelConfig(model, prefix = "CrofAI") {
   const context = Number(model.context_length)
   const output = Number(model.max_completion_tokens)
   const reasoning = modelSupportsReasoning(model)
@@ -159,7 +159,7 @@ function toModelConfig(model) {
   const deepseekThinking = modelUsesDeepSeekThinking(model)
 
   return {
-    name: `CrofAI: ${model.id}`,
+    name: `${prefix}: ${model.id}`,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
     ...(variants ? { variants } : {}),
@@ -170,48 +170,71 @@ function toModelConfig(model) {
   }
 }
 
-async function updateOpencodeConfig() {
-  const config = normalizeOpencodeConfig(readJson(opencodeConfigPath, { $schema: opencodeSchema, provider: {} }))
-  const models = await fetchModels()
-  const existingProvider = isObject(config.provider.CrofAI) ? config.provider.CrofAI : {}
+async function updateProviderConfig(config, providerName, modelsUrl, baseUrl, envVar) {
+  let models
+  try {
+    models = await fetchModels(modelsUrl)
+  } catch {
+    console.log(`Could not fetch models for ${providerName} from ${modelsUrl}; skipping`)
+    return
+  }
+
+  const existingProvider = isObject(config.provider[providerName]) ? config.provider[providerName] : {}
   const existingOptions = isObject(existingProvider.options) ? existingProvider.options : {}
   const existingModels = isObject(existingProvider.models) ? existingProvider.models : {}
 
   const apiKey = typeof existingOptions.apiKey === "string"
     ? existingOptions.apiKey
-    : (process.env.CROFAI_API_KEY || "{env:CROFAI_API_KEY}")
+    : (process.env[envVar] || `{env:${envVar}}`)
 
   const providerModels = Object.fromEntries(models.map((model) => {
     const existingModel = isObject(existingModels[model.id]) ? existingModels[model.id] : {}
-    return [model.id, mergeModelConfig(toModelConfig(model), existingModel)]
+    return [model.id, mergeModelConfig(toModelConfig(model, providerName), existingModel)]
   }))
 
-  config.provider.CrofAI = {
+  config.provider[providerName] = {
     ...existingProvider,
-    name: "CrofAI",
+    name: providerName,
     npm: "@ai-sdk/openai-compatible",
     options: {
       ...existingOptions,
       apiKey,
-      baseURL: "https://crof.ai/v1",
+      baseURL: baseUrl,
     },
     models: providerModels,
   }
+}
+
+async function updateOpencodeConfig() {
+  const config = normalizeOpencodeConfig(readJson(opencodeConfigPath, { $schema: opencodeSchema, provider: {} }))
+
+  await updateProviderConfig(config, "CrofAI", "https://crof.ai/v1/models", "https://crof.ai/v1", "CROFAI_API_KEY")
+  await updateProviderConfig(config, "CrofAI-Beta", "https://beta.crof.ai/v1/models", "https://beta.crof.ai/v1", "CROFAI_API_KEY")
 
   writeJson(opencodeConfigPath, config)
-
-  return { modelCount: models.length, usedEnvFallback: apiKey === "{env:CROFAI_API_KEY}" }
+  return config
 }
 
 async function main() {
   fs.mkdirSync(configDir, { recursive: true })
   updateTuiConfig()
-  const result = await updateOpencodeConfig()
+  const config = await updateOpencodeConfig()
+
+  const crofaiModels = isObject(config.provider.CrofAI) && isObject(config.provider.CrofAI.models)
+    ? Object.keys(config.provider.CrofAI.models).length
+    : 0
+  const betaModels = isObject(config.provider["CrofAI-Beta"]) && isObject(config.provider["CrofAI-Beta"].models)
+    ? Object.keys(config.provider["CrofAI-Beta"].models).length
+    : 0
 
   console.log(`Registered CrofAI plugin in ${tuiConfigPath}`)
-  console.log(`Configured CrofAI provider in ${opencodeConfigPath} with ${result.modelCount} models`)
-  if (result.usedEnvFallback) {
-    console.log("CROFAI_API_KEY not found; wrote {env:CROFAI_API_KEY} placeholder to opencode.json")
+  console.log(`Configured CrofAI provider (${crofaiModels} models) and CrofAI-Beta provider (${betaModels} models) in ${opencodeConfigPath}`)
+
+  const crofaiKey = isObject(config.provider.CrofAI) && isObject(config.provider.CrofAI.options)
+    ? config.provider.CrofAI.options.apiKey
+    : undefined
+  if (typeof crofaiKey === "string" && crofaiKey.startsWith("{env:")) {
+    console.log(`${crofaiKey.slice(1, -1)} not found; wrote placeholder to opencode.json`)
   }
 }
 

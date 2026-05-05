@@ -12,7 +12,6 @@ import { fileURLToPath } from "node:url"
 const CROFAI_URL = "https://crof.ai/usage_api/"
 const PRICING_URL = "https://crof.ai/pricing"
 const MODELS_URL = "https://crof.ai/v1/models"
-const CROFAI_CHAT_COMPLETIONS_URL = "https://crof.ai/v1/chat/completions"
 const MODEL_REFRESH_INTERVAL_MS = 30 * 60 * 1000
 const MODEL_RELOAD_IDLE_MS = 1500
 const MODEL_RELOAD_STARTUP_GRACE_MS = 3000
@@ -76,40 +75,86 @@ const OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
 const DEEPSEEK_THINKING_EFFORTS = ["high", "max"] as const
 const DEEPSEEK_DISABLED_THINKING_EFFORTS = ["low", "medium", "xhigh"] as const
 
+const CROFAI_ORIGINS = ["https://crof.ai", "https://beta.crof.ai", "https://test.crof.ai"] as const
+
+interface CrofaiProviderConfig {
+  name: string
+  baseURL: string
+  envVar: string
+}
+
+const CROFAI_PROVIDER_CONFIGS: CrofaiProviderConfig[] = [
+  { name: "CrofAI", baseURL: "https://crof.ai/v1", envVar: "CROFAI_API_KEY" },
+  { name: "CrofAI-Beta", baseURL: "https://beta.crof.ai/v1", envVar: "CROFAI_API_KEY" },
+  { name: "CrofAI-Test", baseURL: "https://test.crof.ai/v1", envVar: "TEST_CROFAI_API_KEY" },
+]
+
+function isCrofaiBaseURL(baseURL: string): boolean {
+  return CROFAI_ORIGINS.some(origin => baseURL.startsWith(origin))
+}
+
 function getCrofaiKey(api: TuiPluginApi): string | undefined {
-  const provider = api.state.provider.find(p => p.name === "CrofAI")
-  const fromConfig = provider?.options?.apiKey as string | undefined
-  if (fromConfig) return fromConfig
-  if (provider?.key) return provider.key
-  return process.env.CROFAI_API_KEY
+  for (const p of api.state.provider) {
+    if (typeof p.options?.baseURL !== "string" || !isCrofaiBaseURL(p.options.baseURL)) continue
+    const fromConfig = p.options?.apiKey as string | undefined
+    if (fromConfig) return fromConfig
+    if (p.key) return p.key
+  }
+  return process.env.CROFAI_API_KEY || process.env.TEST_CROFAI_API_KEY
 }
 
-function getCrofaiProviderID(api: TuiPluginApi): string | undefined {
-  return api.state.provider.find(p => p.name === "CrofAI")?.id
+function getCrofaiProviders(api: TuiPluginApi): Array<{ name: string; id: string; baseURL: string; origin: string }> {
+  return api.state.provider
+    .filter(p => typeof p.options?.baseURL === "string" && isCrofaiBaseURL(p.options.baseURL))
+    .map(p => ({
+      name: p.name,
+      id: p.id,
+      baseURL: p.options!.baseURL as string,
+      origin: new URL(p.options!.baseURL as string).origin,
+    }))
 }
 
-function isCrofaiSession(api: TuiPluginApi, sessionID: string, crofaiProviderID: string): boolean {
+function getSessionCrofaiProvider(
+  api: TuiPluginApi,
+  sessionID: string,
+  providers: Array<{ name: string; id: string; baseURL: string; origin: string }>,
+): { name: string; id: string; baseURL: string; origin: string } | undefined {
+  const providerIDs = new Set(providers.map(p => p.id))
+  const messages = api.state.session.messages(sessionID)
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message.role === "assistant" && providerIDs.has(message.providerID)) {
+      return providers.find(p => p.id === message.providerID)
+    }
+    if (message.role === "user" && providerIDs.has(message.model.providerID)) {
+      return providers.find(p => p.id === message.model.providerID)
+    }
+  }
+  return undefined
+}
+
+function isCrofaiSession(api: TuiPluginApi, sessionID: string, providerIDs: Set<string>): boolean {
   const messages = api.state.session.messages(sessionID)
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]
     if (message.role === "assistant") {
-      return message.providerID === crofaiProviderID
+      return providerIDs.has(message.providerID)
     }
     if (message.role === "user") {
-      return message.model.providerID === crofaiProviderID
+      return providerIDs.has(message.model.providerID)
     }
   }
   return false
 }
 
-function getSessionCrofaiModelID(api: TuiPluginApi, sessionID: string, crofaiProviderID: string): string | undefined {
+function getSessionCrofaiModelID(api: TuiPluginApi, sessionID: string, providerIDs: Set<string>): string | undefined {
   const messages = api.state.session.messages(sessionID)
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]
-    if (message.role === "assistant" && message.providerID === crofaiProviderID) {
+    if (message.role === "assistant" && providerIDs.has(message.providerID)) {
       return message.modelID
     }
-    if (message.role === "user" && message.model.providerID === crofaiProviderID) {
+    if (message.role === "user" && providerIDs.has(message.model.providerID)) {
       return message.model.modelID
     }
   }
@@ -241,9 +286,10 @@ async function collectChildTokens(
   }
 }
 
-async function fetchUsage(key: string): Promise<UsageData | null> {
+async function fetchUsage(key: string, origin?: string): Promise<UsageData | null> {
+  const url = origin ? `${origin}/usage_api/` : CROFAI_URL
   try {
-    const res = await fetch(CROFAI_URL, {
+    const res = await fetch(url, {
       headers: { Authorization: `Bearer ${key}` },
     })
     if (!res.ok) return null
@@ -266,14 +312,15 @@ async function fetchPricingModels(): Promise<PricingModel[] | null> {
   }
 }
 
-async function fetchModelsApi(): Promise<ModelsApiModel[] | null> {
+async function fetchModelsApi(baseURL?: string): Promise<ModelsApiModel[] | null> {
+  const url = baseURL ? `${baseURL}/models` : MODELS_URL
   try {
-    const res = await fetch(MODELS_URL)
+    const res = await fetch(url)
     if (!res.ok) return null
     const data = await res.json()
     if (!Array.isArray(data.data)) return null
     return data.data as ModelsApiModel[]
-  } catch (_error) {
+  } catch {
     return null
   }
 }
@@ -334,7 +381,7 @@ function toReasoningVariants(model: ModelsApiModel): Record<string, unknown> | u
   return variants
 }
 
-function toInstalledModelConfig(model: ModelsApiModel): ModelConfig {
+function toInstalledModelConfig(model: ModelsApiModel, providerPrefix: string = "CrofAI"): ModelConfig {
   const context = Number(model.context_length)
   const output = Number(model.max_completion_tokens)
   const reasoning = modelSupportsReasoning(model)
@@ -342,7 +389,7 @@ function toInstalledModelConfig(model: ModelsApiModel): ModelConfig {
   const deepseekThinking = modelUsesDeepSeekThinking(model)
 
   return {
-    name: `CrofAI: ${model.id}`,
+    name: `${providerPrefix}: ${model.id}`,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
     ...(variants ? { variants } : {}),
@@ -375,57 +422,65 @@ function mergeModelConfig(generated: ModelConfig, existing: ModelConfig): ModelC
   return merged
 }
 
-interface ModelRefreshResult {
+async function refreshGlobalOpencodeConfig(): Promise<{
   changed: boolean
-  models: ModelsApiModel[]
-  installedModels: Record<string, unknown>
-}
-
-async function refreshGlobalOpencodeConfig(): Promise<ModelRefreshResult | null> {
-  const models = await fetchModelsApi()
-  if (!models) return null
-
+  installedModelsByProvider: Record<string, Record<string, unknown>>
+} | null> {
   const config = readOpencodeConfig()
   const provider = isObject(config.provider) ? config.provider : {}
-  const existingCrofai = isObject(provider.CrofAI) ? provider.CrofAI : {}
-  const existingOptions = isObject(existingCrofai.options) ? existingCrofai.options : {}
+  let anyChanged = false
+  const installedModelsByProvider: Record<string, Record<string, unknown>> = {}
 
-  const existingCrofaiModels = isObject(existingCrofai.models) ? (existingCrofai.models as Record<string, unknown>) : {}
-  const mergedModels: Record<string, unknown> = {}
-  for (const model of models) {
-    const existingModel = isObject(existingCrofaiModels[model.id]) ? (existingCrofaiModels[model.id] as Record<string, unknown>) : {}
-    mergedModels[model.id] = mergeModelConfig(toInstalledModelConfig(model), existingModel)
+  for (const providerConfig of CROFAI_PROVIDER_CONFIGS) {
+    const models = await fetchModelsApi(providerConfig.baseURL)
+    if (!models) {
+      installedModelsByProvider[providerConfig.name] = {}
+      continue
+    }
+
+    const existingProviderSection = isObject(provider[providerConfig.name]) ? provider[providerConfig.name] : {}
+    const existingOptions = isObject(existingProviderSection.options) ? existingProviderSection.options : {}
+    const existingModels = isObject(existingProviderSection.models) ? (existingProviderSection.models as Record<string, unknown>) : {}
+
+    const mergedModels: Record<string, unknown> = {}
+    for (const model of models) {
+      const existingModel = isObject(existingModels[model.id]) ? (existingModels[model.id] as Record<string, unknown>) : {}
+      mergedModels[model.id] = mergeModelConfig(toInstalledModelConfig(model, providerConfig.name), existingModel)
+    }
+
+    provider[providerConfig.name] = {
+      ...existingProviderSection,
+      name: providerConfig.name,
+      npm: "@ai-sdk/openai-compatible",
+      options: {
+        ...existingOptions,
+        ...(typeof existingOptions.apiKey === "string" ? {} : { apiKey: process.env[providerConfig.envVar] || `{env:${providerConfig.envVar}}` }),
+        baseURL: providerConfig.baseURL,
+      },
+      models: mergedModels,
+    }
+    installedModelsByProvider[providerConfig.name] = mergedModels
+    anyChanged = true
   }
+
+  if (!anyChanged) return null
 
   const nextConfig = {
     ...config,
     $schema: typeof config.$schema === "string" ? config.$schema : OPENCODE_CONFIG_SCHEMA,
-    provider: {
-      ...provider,
-      CrofAI: {
-        ...existingCrofai,
-        name: "CrofAI",
-        npm: "@ai-sdk/openai-compatible",
-        options: {
-          ...existingOptions,
-          ...(typeof existingOptions.apiKey === "string" ? {} : { apiKey: process.env.CROFAI_API_KEY || "{env:CROFAI_API_KEY}" }),
-          baseURL: "https://crof.ai/v1",
-        },
-        models: mergedModels,
-      },
-    },
+    provider,
   }
 
   fs.mkdirSync(path.dirname(OPENCODE_CONFIG_PATH), { recursive: true })
   const before = stableStringify(config)
   const after = stableStringify(nextConfig)
-  if (before === after) return { changed: false, models, installedModels: mergedModels }
+  if (before === after) return { changed: false, installedModelsByProvider }
   fs.writeFileSync(OPENCODE_CONFIG_PATH, after)
-  return { changed: true, models, installedModels: mergedModels }
+  return { changed: true, installedModelsByProvider }
 }
 
-function liveProviderNeedsModelReload(api: TuiPluginApi, installedModels: Record<string, unknown>): boolean {
-  const provider = api.state.provider.find((item) => item.name === "CrofAI")
+function liveProviderNeedsModelReload(api: TuiPluginApi, providerName: string, installedModels: Record<string, unknown>): boolean {
+  const provider = api.state.provider.find((item) => item.name === providerName)
   if (!provider) return false
   const liveModels = isObject(provider.models) ? provider.models : {}
 
@@ -433,7 +488,6 @@ function liveProviderNeedsModelReload(api: TuiPluginApi, installedModels: Record
     if (!isObject(installedModel)) continue
     const liveModel = liveModels[modelID]
     if (!isObject(liveModel)) continue
-    if (!liveModel) continue
 
     const capabilities = isObject(liveModel.capabilities) ? liveModel.capabilities : {}
     if (installedModel.reasoning === true && capabilities.reasoning !== true) return true
@@ -463,9 +517,9 @@ function isCrofaiChatCompletionUrl(value: string | undefined): boolean {
   if (!value) return false
   try {
     const url = new URL(value)
-    return url.origin === "https://crof.ai" && url.pathname === "/v1/chat/completions"
-  } catch (_error) {
-    return value.startsWith(CROFAI_CHAT_COMPLETIONS_URL)
+    return CROFAI_ORIGINS.some(origin => url.origin === origin) && url.pathname === "/v1/chat/completions"
+  } catch {
+    return CROFAI_ORIGINS.some(origin => value.startsWith(`${origin}/v1/chat/completions`))
   }
 }
 
@@ -542,6 +596,7 @@ function buildSidebar(
   tps: number | null,
   tokens: SessionTokens | null,
   childTokens: SessionTokens | null,
+  providerName: string = "CrofAI",
 ) {
   const t = api.theme.current
 
@@ -557,7 +612,7 @@ function buildSidebar(
   const title = createElement("text")
   title.fg = t.text
   title.attributes = TextAttributes.BOLD
-  insert(title, createTextNode("CrofAI"))
+  insert(title, createTextNode(providerName))
   insert(root, title)
 
   if (tokens && tokens.total > 0) {
@@ -659,9 +714,17 @@ const tui: TuiPlugin = async (api) => {
     modelRefreshInFlight = true
     try {
       const result = await refreshGlobalOpencodeConfig()
-      if (result && (result.changed || liveProviderNeedsModelReload(api, result.installedModels))) {
-        pendingModelReload = true
-        scheduleModelReload()
+      if (result) {
+        let needsReload = result.changed
+        for (const [providerName, installedModels] of Object.entries(result.installedModelsByProvider)) {
+          if (liveProviderNeedsModelReload(api, providerName, installedModels)) {
+            needsReload = true
+          }
+        }
+        if (needsReload) {
+          pendingModelReload = true
+          scheduleModelReload()
+        }
       }
     } finally {
       modelRefreshInFlight = false
@@ -682,9 +745,9 @@ const tui: TuiPlugin = async (api) => {
     scheduleModelReload()
   })
 
+  const providers = getCrofaiProviders(api)
   const key = getCrofaiKey(api)
-  const crofaiProviderID = getCrofaiProviderID(api)
-  if (!key || !crofaiProviderID) {
+  if (providers.length === 0 || !key) {
     api.lifecycle.onDispose(() => {
       disposed = true
       uninstallReasoningStreamPatch()
@@ -694,6 +757,7 @@ const tui: TuiPlugin = async (api) => {
     })
     return
   }
+  const crofaiProviderIDs = new Set(providers.map(p => p.id))
 
   const [getData, setData] = createSignal<UsageData | null>(null)
   const [getErr, setErr] = createSignal(false)
@@ -730,7 +794,9 @@ const tui: TuiPlugin = async (api) => {
     }
     usageRefreshInFlight = true
     try {
-      const [result, pricingModels] = await Promise.all([fetchUsage(key), fetchPricingModels()])
+      const sid = getCurrentSessionID()
+      const sessionProvider = sid ? getSessionCrofaiProvider(api, sid, providers) : undefined
+      const [result, pricingModels] = await Promise.all([fetchUsage(key, sessionProvider?.origin), fetchPricingModels()])
       if (result) {
         setData(result)
         setErr(false)
@@ -776,10 +842,11 @@ const tui: TuiPlugin = async (api) => {
     order: 150,
     slots: {
       sidebar_content(_ctx, props) {
-        if (!isCrofaiSession(api, props.session_id, crofaiProviderID)) return null
+        if (!isCrofaiSession(api, props.session_id, crofaiProviderIDs)) return null
         setCurrentSessionID(props.session_id)
         refreshChildTokens(props.session_id)
-        const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderID)
+        const sessionProvider = getSessionCrofaiProvider(api, props.session_id, providers)
+        const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderIDs)
         const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
         const parentTokens = getSessionTokens(api, props.session_id)
         const childTokens = getChildTokens()
@@ -790,6 +857,7 @@ const tui: TuiPlugin = async (api) => {
           tps,
           parentTokens,
           childTokens?.sessionID === props.session_id ? childTokens.tokens : null,
+          sessionProvider?.name ?? "CrofAI",
         )
       },
     },
