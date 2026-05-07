@@ -366,6 +366,11 @@ function modelUsesDeepSeekThinking(model: ModelsApiModel): boolean {
   return modelSupportsReasoning(model) && model.id.toLowerCase().includes("deepseek-v4")
 }
 
+function modelSupportsVision(model: ModelsApiModel): boolean {
+  const id = model.id.toLowerCase()
+  return id.startsWith("kimi-") || id.startsWith("gemma-") || id.startsWith("qwen")
+}
+
 function toReasoningVariants(model: ModelsApiModel): Record<string, unknown> | undefined {
   if (!modelUsesDeepSeekThinking(model)) return undefined
 
@@ -387,11 +392,13 @@ function toInstalledModelConfig(model: ModelsApiModel, providerPrefix: string = 
   const reasoning = modelSupportsReasoning(model)
   const variants = toReasoningVariants(model)
   const deepseekThinking = modelUsesDeepSeekThinking(model)
+  const vision = modelSupportsVision(model)
 
   return {
     name: `${providerPrefix}: ${model.id}`,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
+    ...(vision ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
     ...(variants ? { variants } : {}),
     limit: {
       context: Number.isFinite(context) ? context : 0,
@@ -427,6 +434,7 @@ async function refreshGlobalOpencodeConfig(): Promise<{
   installedModelsByProvider: Record<string, Record<string, unknown>>
 } | null> {
   const config = readOpencodeConfig()
+  const before = stableStringify(config)
   const provider = isObject(config.provider) ? config.provider : {}
   let anyChanged = false
   const installedModelsByProvider: Record<string, Record<string, unknown>> = {}
@@ -472,7 +480,6 @@ async function refreshGlobalOpencodeConfig(): Promise<{
   }
 
   fs.mkdirSync(path.dirname(OPENCODE_CONFIG_PATH), { recursive: true })
-  const before = stableStringify(config)
   const after = stableStringify(nextConfig)
   if (before === after) return { changed: false, installedModelsByProvider }
   fs.writeFileSync(OPENCODE_CONFIG_PATH, after)
@@ -491,6 +498,12 @@ function liveProviderNeedsModelReload(api: TuiPluginApi, providerName: string, i
 
     const capabilities = isObject(liveModel.capabilities) ? liveModel.capabilities : {}
     if (installedModel.reasoning === true && capabilities.reasoning !== true) return true
+
+    const installedModalities = isObject(installedModel.modalities) ? installedModel.modalities : undefined
+    if (installedModalities) {
+      const liveInput = isObject(capabilities.input) ? capabilities.input : {}
+      if (liveInput.image !== true) return true
+    }
 
     const installedVariants = isObject(installedModel.variants) ? installedModel.variants : undefined
     if (!installedVariants) continue
