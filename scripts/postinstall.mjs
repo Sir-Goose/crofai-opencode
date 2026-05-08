@@ -156,6 +156,10 @@ async function fetchModels(url = modelsURL) {
   return data.data
 }
 
+function formatModelName(id) {
+  return id.split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
+}
+
 function toModelConfig(model, prefix = "CrofAI") {
   const context = Number(model.context_length)
   const output = Number(model.max_completion_tokens)
@@ -165,7 +169,7 @@ function toModelConfig(model, prefix = "CrofAI") {
   const vision = modelSupportsVision(model)
 
   return {
-    name: model.id,
+    name: formatModelName(model.id),
     temperature: true,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
@@ -199,8 +203,9 @@ async function updateProviderConfig(config, providerName, modelsUrl, baseUrl, en
     const existingModel = isObject(existingModels[model.id]) ? existingModels[model.id] : {}
     const merged = mergeModelConfig(toModelConfig(model, providerName), existingModel)
     const existingName = existingModel?.name
-    if (typeof existingName === "string" && existingName === `${providerName}: ${model.id}`) {
-      merged.name = model.id
+    const formattedName = formatModelName(model.id)
+    if (typeof existingName === "string" && (existingName === `${providerName}: ${model.id}` || existingName === model.id)) {
+      merged.name = formattedName
     }
     return [model.id, merged]
   }))

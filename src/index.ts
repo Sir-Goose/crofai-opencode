@@ -386,6 +386,10 @@ function toReasoningVariants(model: ModelsApiModel): Record<string, unknown> | u
   return variants
 }
 
+function formatModelName(id: string): string {
+  return id.split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
+}
+
 function toInstalledModelConfig(model: ModelsApiModel, providerPrefix: string = "CrofAI"): ModelConfig {
   const context = Number(model.context_length)
   const output = Number(model.max_completion_tokens)
@@ -395,7 +399,7 @@ function toInstalledModelConfig(model: ModelsApiModel, providerPrefix: string = 
   const vision = modelSupportsVision(model)
 
   return {
-    name: model.id,
+    name: formatModelName(model.id),
     temperature: true,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
@@ -456,9 +460,10 @@ async function refreshGlobalOpencodeConfig(): Promise<{
       const existingModel = isObject(existingModels[model.id]) ? (existingModels[model.id] as Record<string, unknown>) : {}
       const merged = mergeModelConfig(toInstalledModelConfig(model, providerConfig.name), existingModel)
       const existingName = existingModel?.name
+      const formattedName = formatModelName(model.id)
       const oldPrefixedName = `${providerConfig.name}: ${model.id}`
-      if (typeof existingName === "string" && existingName === oldPrefixedName) {
-        (merged as Record<string, unknown>).name = model.id
+      if (typeof existingName === "string" && (existingName === oldPrefixedName || existingName === model.id)) {
+        (merged as Record<string, unknown>).name = formattedName
       }
       mergedModels[model.id] = merged
     }
