@@ -18,7 +18,7 @@
     "build": "bun run build:js && bun run build:types",
     "build:js": "bun build src/index.ts --outdir dist --target=bun --sourcemap --entry-naming=[dir]/tui.js --external @opencode-ai/plugin --external @opentui/core --external @opentui/solid --external solid-js",
     "build:types": "cp src/index.d.ts dist/tui.d.ts",
-    "postinstall": "node scripts/postinstall.mjs",
+    "postinstall": "bun scripts/postinstall.mjs",
     "prepublishOnly": "bun run build"
   },
   "keywords": [
