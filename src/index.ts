@@ -396,6 +396,7 @@ function toInstalledModelConfig(model: ModelsApiModel, providerPrefix: string = 
 
   return {
     name: `${providerPrefix}: ${model.id}`,
+    temperature: true,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
     ...(vision ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
