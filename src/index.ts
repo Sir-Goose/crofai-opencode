@@ -692,7 +692,7 @@ function buildSidebar(
   if (childTokens && childTokens.total > 0) {
     const childLine = createElement("text")
     childLine.fg = t.textMuted
-    insert(childLine, createTextNode(formatNum(childTokens.total) + " tokens (sub)"))
+    insert(childLine, createTextNode(formatNum(childTokens.total) + " tokens (sub-agents)"))
     insert(root, childLine)
   }
 

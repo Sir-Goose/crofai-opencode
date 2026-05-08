@@ -30,7 +30,7 @@ On every OpenCode start the plugin runs `git pull --ff-only` in the background. 
 
 ## Behavior
 
-- Shows token count for the current session (`XXX tokens`) and child/branch sessions (`XXX tokens (sub)`)
+- Shows token count for the current session (`XXX tokens`) and child/branch sessions (`XXX tokens (sub-agents)`)
 - Shows `XXX requests remaining` or `Pay-per-token` depending on your plan
 - Shows credit balance (`$X.XXXX credits`) — red when negative, green when positive
 - Shows current model speed as `~XX t/s` using data extracted from the CrofAI pricing page HTML
