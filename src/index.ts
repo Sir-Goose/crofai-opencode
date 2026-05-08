@@ -386,8 +386,51 @@ function toReasoningVariants(model: ModelsApiModel): Record<string, unknown> | u
   return variants
 }
 
+const ACRONYMS = new Set(["glm", "it"])
+const BRAND_NAMES: Record<string, string> = {
+  deepseek: "DeepSeek",
+  minimax: "MiniMax",
+}
+
+function capitalizeWord(word: string): string {
+  const lower = word.toLowerCase()
+  if (ACRONYMS.has(lower)) return lower.toUpperCase()
+  if (lower in BRAND_NAMES) return BRAND_NAMES[lower]
+  return word.charAt(0).toUpperCase() + word.slice(1)
+}
+
 function formatModelName(id: string): string {
-  return id.split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
+  const parts = id.split("-")
+  const result: string[] = []
+
+  for (const part of parts) {
+    if (/^\d+(\.\d+)?$/.test(part)) {
+      result.push(part)
+      continue
+    }
+
+    const tntMatch = part.match(/^([a-zA-Z]+)(\d[\d.]*)([a-zA-Z]+)$/)
+    if (tntMatch) {
+      result.push(`${capitalizeWord(tntMatch[1])}${tntMatch[2]}${tntMatch[3].toUpperCase()}`)
+      continue
+    }
+
+    const tnMatch = part.match(/^([a-zA-Z]+)(\d[\d.]*)$/)
+    if (tnMatch && tnMatch[1].length > 1) {
+      result.push(`${capitalizeWord(tnMatch[1])} ${tnMatch[2]}`)
+      continue
+    }
+
+    const ntMatch = part.match(/^(\d[\d.]*)([a-zA-Z]+)$/)
+    if (ntMatch) {
+      result.push(`${ntMatch[1]}${ntMatch[2].toUpperCase()}`)
+      continue
+    }
+
+    result.push(capitalizeWord(part))
+  }
+
+  return result.join(" ")
 }
 
 function toInstalledModelConfig(model: ModelsApiModel, providerPrefix: string = "CrofAI"): ModelConfig {
