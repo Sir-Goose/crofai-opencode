@@ -165,7 +165,7 @@ function toModelConfig(model, prefix = "CrofAI") {
   const vision = modelSupportsVision(model)
 
   return {
-    name: `${prefix}: ${model.id}`,
+    name: model.id,
     temperature: true,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
@@ -197,7 +197,12 @@ async function updateProviderConfig(config, providerName, modelsUrl, baseUrl, en
 
   const providerModels = Object.fromEntries(models.map((model) => {
     const existingModel = isObject(existingModels[model.id]) ? existingModels[model.id] : {}
-    return [model.id, mergeModelConfig(toModelConfig(model, providerName), existingModel)]
+    const merged = mergeModelConfig(toModelConfig(model, providerName), existingModel)
+    const existingName = existingModel?.name
+    if (typeof existingName === "string" && existingName === `${providerName}: ${model.id}`) {
+      merged.name = model.id
+    }
+    return [model.id, merged]
   }))
 
   config.provider[providerName] = {

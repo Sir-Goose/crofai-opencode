@@ -395,7 +395,7 @@ function toInstalledModelConfig(model: ModelsApiModel, providerPrefix: string = 
   const vision = modelSupportsVision(model)
 
   return {
-    name: `${providerPrefix}: ${model.id}`,
+    name: model.id,
     temperature: true,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
@@ -454,7 +454,13 @@ async function refreshGlobalOpencodeConfig(): Promise<{
     const mergedModels: Record<string, unknown> = {}
     for (const model of models) {
       const existingModel = isObject(existingModels[model.id]) ? (existingModels[model.id] as Record<string, unknown>) : {}
-      mergedModels[model.id] = mergeModelConfig(toInstalledModelConfig(model, providerConfig.name), existingModel)
+      const merged = mergeModelConfig(toInstalledModelConfig(model, providerConfig.name), existingModel)
+      const existingName = existingModel?.name
+      const oldPrefixedName = `${providerConfig.name}: ${model.id}`
+      if (typeof existingName === "string" && existingName === oldPrefixedName) {
+        (merged as Record<string, unknown>).name = model.id
+      }
+      mergedModels[model.id] = merged
     }
 
     provider[providerConfig.name] = {
