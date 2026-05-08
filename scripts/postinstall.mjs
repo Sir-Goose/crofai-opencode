@@ -68,6 +68,11 @@ function modelUsesDeepSeekThinking(model) {
   return modelSupportsReasoning(model) && model.id.toLowerCase().includes("deepseek-v4")
 }
 
+function modelSupportsVision(model) {
+  const id = model.id.toLowerCase()
+  return id.startsWith("kimi-") || id.startsWith("gemma-") || id.startsWith("qwen")
+}
+
 function toReasoningVariants(model) {
   if (!modelUsesDeepSeekThinking(model)) return undefined
 
@@ -157,11 +162,14 @@ function toModelConfig(model, prefix = "CrofAI") {
   const reasoning = modelSupportsReasoning(model)
   const variants = toReasoningVariants(model)
   const deepseekThinking = modelUsesDeepSeekThinking(model)
+  const vision = modelSupportsVision(model)
 
   return {
     name: `${prefix}: ${model.id}`,
+    temperature: true,
     ...(reasoning ? { reasoning: true } : {}),
     ...(deepseekThinking ? { interleaved: { field: "reasoning_content" } } : {}),
+    ...(vision ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
     ...(variants ? { variants } : {}),
     limit: {
       context: Number.isFinite(context) ? context : 0,
@@ -210,6 +218,7 @@ async function updateOpencodeConfig() {
 
   await updateProviderConfig(config, "CrofAI", "https://crof.ai/v1/models", "https://crof.ai/v1", "CROFAI_API_KEY")
   await updateProviderConfig(config, "CrofAI-Beta", "https://beta.crof.ai/v1/models", "https://beta.crof.ai/v1", "CROFAI_API_KEY")
+  await updateProviderConfig(config, "CrofAI-Test", "https://test.crof.ai/v1/models", "https://test.crof.ai/v1", "TEST_CROFAI_API_KEY")
 
   writeJson(opencodeConfigPath, config)
   return config
@@ -226,9 +235,12 @@ async function main() {
   const betaModels = isObject(config.provider["CrofAI-Beta"]) && isObject(config.provider["CrofAI-Beta"].models)
     ? Object.keys(config.provider["CrofAI-Beta"].models).length
     : 0
+  const testModels = isObject(config.provider["CrofAI-Test"]) && isObject(config.provider["CrofAI-Test"].models)
+    ? Object.keys(config.provider["CrofAI-Test"].models).length
+    : 0
 
   console.log(`Registered CrofAI plugin in ${tuiConfigPath}`)
-  console.log(`Configured CrofAI provider (${crofaiModels} models) and CrofAI-Beta provider (${betaModels} models) in ${opencodeConfigPath}`)
+  console.log(`Configured CrofAI provider (${crofaiModels} models), CrofAI-Beta provider (${betaModels} models), and CrofAI-Test provider (${testModels} models) in ${opencodeConfigPath}`)
 
   const crofaiKey = isObject(config.provider.CrofAI) && isObject(config.provider.CrofAI.options)
     ? config.provider.CrofAI.options.apiKey
