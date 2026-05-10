@@ -16,7 +16,14 @@ const PRICING_URL = "https://crof.ai/pricing"
 const MODEL_REFRESH_INTERVAL_MS = 30 * 60 * 1000
 const MODEL_RELOAD_IDLE_MS = 1500
 const MODEL_RELOAD_STARTUP_GRACE_MS = 3000
+const PRICING_REFRESH_INTERVAL_MS = 30 * 60 * 1000
+const SESSION_UPDATE_REFRESH_MIN_INTERVAL_MS = 8000
+const BACKGROUND_STARTUP_GRACE_MS = 45000
 const CROFAI_FETCH_PATCH_KEY = Symbol.for("crofai.opencode.fetchPatch")
+const ENABLE_AUTO_UPDATE = true
+const ENABLE_MODEL_REFRESH = true
+const ENABLE_USAGE_REFRESH = true
+const ENABLE_CHILD_TOKEN_REFRESH = true
 
 const execAsync = promisify(execCb)
 
@@ -468,46 +475,9 @@ function createCrofaiReasoningTransform(): TransformStream<Uint8Array, Uint8Arra
 }
 
 function installCrofaiReasoningStreamPatch(): () => void {
-  const globalWithPatch = globalThis as typeof globalThis & { [CROFAI_FETCH_PATCH_KEY]?: FetchPatchState }
-  let state = globalWithPatch[CROFAI_FETCH_PATCH_KEY]
-
-  if (!state) {
-    state = {
-      originalFetch: globalThis.fetch.bind(globalThis),
-      refs: 0,
-    }
-
-    const patchedFetch: typeof fetch = async (input, init) => {
-      const response = await state.originalFetch(input, init)
-      const contentType = response.headers.get("content-type") ?? ""
-      if (
-        !response.body ||
-        !isCrofaiChatCompletionUrl(getFetchUrl(input)) ||
-        !contentType.toLowerCase().includes("text/event-stream")
-      ) {
-        return response
-      }
-
-      return new Response(response.body.pipeThrough(createCrofaiReasoningTransform()), {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      })
-    }
-
-    globalWithPatch[CROFAI_FETCH_PATCH_KEY] = state
-    globalThis.fetch = patchedFetch
-  }
-
-  state.refs += 1
-  return () => {
-    const current = globalWithPatch[CROFAI_FETCH_PATCH_KEY]
-    if (!current) return
-    current.refs -= 1
-    if (current.refs > 0) return
-    globalThis.fetch = current.originalFetch
-    delete globalWithPatch[CROFAI_FETCH_PATCH_KEY]
-  }
+  // Disabled: mutating SSE byte streams can interfere with incremental token rendering.
+  // Keep this function as a no-op to preserve plugin lifecycle wiring.
+  return () => {}
 }
 
 function buildSidebar(
@@ -588,7 +558,6 @@ function buildSidebar(
 }
 
 const tui: TuiPlugin = async (api) => {
-  void autoUpdate()
   const uninstallReasoningStreamPatch = installCrofaiReasoningStreamPatch()
 
   const activeSessions = new Set<string>()
@@ -597,10 +566,29 @@ const tui: TuiPlugin = async (api) => {
   let modelReloadTimer: ReturnType<typeof setTimeout> | undefined
   let modelRefreshInFlight = false
   let disposed = false
+  let backgroundReady = false
+  let backgroundReadyTimer: ReturnType<typeof setTimeout> | undefined
+  let autoUpdateTimer: ReturnType<typeof setTimeout> | undefined
 
   function hasActiveSession(): boolean {
     return activeSessions.size > 0
   }
+
+  function scheduleAutoUpdate(delay: number = BACKGROUND_STARTUP_GRACE_MS): void {
+    if (!ENABLE_AUTO_UPDATE || disposed) return
+    if (autoUpdateTimer) clearTimeout(autoUpdateTimer)
+    autoUpdateTimer = setTimeout(() => {
+      autoUpdateTimer = undefined
+      if (disposed) return
+      if (hasActiveSession()) {
+        scheduleAutoUpdate(10000)
+        return
+      }
+      void autoUpdate()
+    }, delay)
+  }
+
+  scheduleAutoUpdate()
 
   function clearModelReloadTimer(): void {
     if (!modelReloadTimer) return
@@ -652,19 +640,23 @@ const tui: TuiPlugin = async (api) => {
     }
   }
 
-  void refreshModels()
-  const modelRefreshInterval = setInterval(() => {
-    void refreshModels()
-  }, MODEL_REFRESH_INTERVAL_MS)
+  const modelRefreshInterval = ENABLE_MODEL_REFRESH
+    ? setInterval(() => {
+        if (!backgroundReady) return
+        void refreshModels()
+      }, MODEL_REFRESH_INTERVAL_MS)
+    : undefined
 
-  const sessionStatusUnsub = api.event.on("session.status", (event) => {
-    if (event.properties.status.type === "idle") {
-      activeSessions.delete(event.properties.sessionID)
-    } else {
-      activeSessions.add(event.properties.sessionID)
-    }
-    scheduleModelReload()
-  })
+  const sessionStatusUnsub = ENABLE_MODEL_REFRESH
+    ? api.event.on("session.status", (event) => {
+        if (event.properties.status.type === "idle") {
+          activeSessions.delete(event.properties.sessionID)
+        } else {
+          activeSessions.add(event.properties.sessionID)
+        }
+        scheduleModelReload()
+      })
+    : () => {}
 
   const providers = getCrofaiProviders(api)
   const key = getCrofaiKey(api)
@@ -707,6 +699,7 @@ const tui: TuiPlugin = async (api) => {
 
   let usageRefreshInFlight = false
   let usageRefreshQueued = false
+  let lastPricingRefreshAt = 0
 
   const refresh = async () => {
     if (usageRefreshInFlight) {
@@ -716,15 +709,24 @@ const tui: TuiPlugin = async (api) => {
     usageRefreshInFlight = true
     try {
       const sid = getCurrentSessionID()
-      const sessionProvider = sid ? getSessionCrofaiProvider(api, sid, providers) : undefined
-      const [result, pricingModels] = await Promise.all([fetchUsage(key, sessionProvider?.origin), fetchPricingModels()])
+      const sessionProvider = sid ? getSessionCrofaiProvider(api, sid, providers) : providers[0]
+      const now = Date.now()
+      const shouldRefreshPricing =
+        getPricingModels().length === 0 || now - lastPricingRefreshAt >= PRICING_REFRESH_INTERVAL_MS
+
+      const usagePromise = fetchUsage(key, sessionProvider?.origin)
+      const pricingPromise = shouldRefreshPricing ? fetchPricingModels() : Promise.resolve<PricingModel[] | null>(null)
+      const [result, pricingModels] = await Promise.all([usagePromise, pricingPromise])
       if (result) {
         setData(result)
         setErr(false)
       } else {
         setErr(true)
       }
-      if (pricingModels) setPricingModels(pricingModels)
+      if (pricingModels) {
+        setPricingModels(pricingModels)
+        lastPricingRefreshAt = now
+      }
     } finally {
       usageRefreshInFlight = false
       if (usageRefreshQueued) {
@@ -734,29 +736,65 @@ const tui: TuiPlugin = async (api) => {
     }
   }
 
-  void refresh()
-  const usageInterval = setInterval(() => {
-    void refresh()
-    const sid = getCurrentSessionID()
-    if (sid) refreshChildTokens(sid, true)
-  }, 30000)
+  if (ENABLE_USAGE_REFRESH) void refresh()
+  const usageInterval = ENABLE_USAGE_REFRESH
+    ? setInterval(() => {
+        if (!backgroundReady) return
+        void refresh()
+        if (ENABLE_CHILD_TOKEN_REFRESH) {
+          const sid = getCurrentSessionID()
+          if (sid) void refreshChildTokens(sid, false)
+        }
+      }, 30000)
+    : undefined
 
+  let lastSessionUpdateRefreshAt = 0
   const onSessionUpdated = async () => {
-    void refresh()
+    if (!backgroundReady) return
+    const now = Date.now()
+    if (now - lastSessionUpdateRefreshAt < SESSION_UPDATE_REFRESH_MIN_INTERVAL_MS) return
+    lastSessionUpdateRefreshAt = now
+    if (ENABLE_USAGE_REFRESH) void refresh()
     const sid = getCurrentSessionID()
-    if (sid) refreshChildTokens(sid, true)
+    if (sid && ENABLE_CHILD_TOKEN_REFRESH) void refreshChildTokens(sid, false)
   }
 
-  const sessionUnsub = api.event.on("session.updated.1", onSessionUpdated)
+  const sessionUnsub =
+    ENABLE_USAGE_REFRESH || ENABLE_CHILD_TOKEN_REFRESH ? api.event.on("session.updated.1", onSessionUpdated) : () => {}
+
+  const sessionStatusRefreshUnsub =
+    ENABLE_USAGE_REFRESH || ENABLE_CHILD_TOKEN_REFRESH
+      ? api.event.on("session.status", (event) => {
+          if (!backgroundReady) return
+          if (event.properties.status.type !== "idle") return
+          const sid = getCurrentSessionID()
+          if (!sid || sid !== event.properties.sessionID) return
+          if (ENABLE_USAGE_REFRESH) void refresh()
+          if (ENABLE_CHILD_TOKEN_REFRESH) void refreshChildTokens(sid, true)
+        })
+      : () => {}
+
+  backgroundReadyTimer = setTimeout(() => {
+    backgroundReadyTimer = undefined
+    if (disposed) return
+    backgroundReady = true
+    if (ENABLE_MODEL_REFRESH) void refreshModels()
+    if (ENABLE_USAGE_REFRESH) void refresh()
+    const sid = getCurrentSessionID()
+    if (sid && ENABLE_CHILD_TOKEN_REFRESH) void refreshChildTokens(sid, false)
+  }, BACKGROUND_STARTUP_GRACE_MS)
 
   api.lifecycle.onDispose(() => {
     disposed = true
     uninstallReasoningStreamPatch()
-    clearInterval(modelRefreshInterval)
+    if (modelRefreshInterval) clearInterval(modelRefreshInterval)
     clearModelReloadTimer()
-    clearInterval(usageInterval)
+    if (usageInterval) clearInterval(usageInterval)
+    if (backgroundReadyTimer) clearTimeout(backgroundReadyTimer)
+    if (autoUpdateTimer) clearTimeout(autoUpdateTimer)
     sessionStatusUnsub()
     sessionUnsub()
+    sessionStatusRefreshUnsub()
   })
 
   api.slots.register({
@@ -765,7 +803,7 @@ const tui: TuiPlugin = async (api) => {
       sidebar_content(_ctx, props) {
         if (!isCrofaiSession(api, props.session_id, crofaiProviderIDs)) return null
         setCurrentSessionID(props.session_id)
-        refreshChildTokens(props.session_id)
+        if (backgroundReady && ENABLE_CHILD_TOKEN_REFRESH) refreshChildTokens(props.session_id)
         const sessionProvider = getSessionCrofaiProvider(api, props.session_id, providers)
         const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderIDs)
         const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
