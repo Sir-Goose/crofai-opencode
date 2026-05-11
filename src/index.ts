@@ -19,7 +19,6 @@ const MODEL_RELOAD_STARTUP_GRACE_MS = 3000
 const PRICING_REFRESH_INTERVAL_MS = 30 * 60 * 1000
 const SESSION_UPDATE_REFRESH_MIN_INTERVAL_MS = 8000
 const BACKGROUND_STARTUP_GRACE_MS = 45000
-const CROFAI_FETCH_PATCH_KEY = Symbol.for("crofai.opencode.fetchPatch")
 const ENABLE_AUTO_UPDATE = true
 const ENABLE_MODEL_REFRESH = true
 const ENABLE_USAGE_REFRESH = true
@@ -67,6 +66,17 @@ type FetchPatchState = {
   originalFetch: typeof fetch
   refs: number
 }
+
+const FETCH_PATCH_SYMBOL = Symbol.for("crofai.opencode.fetchPatch")
+const MAX_REASONING_SYSTEM_PROMPT = [
+  "Reasoning Effort: Absolute maximum with no shortcuts permitted.",
+  "You MUST be very thorough in your thinking and comprehensively decompose the",
+  "problem to resolve the root cause, rigorously stress-testing your logic against all potential",
+  "paths, edge cases, and adversarial scenarios.",
+  "Explicitly write out your entire deliberation process, documenting every intermediate",
+  "step, considered alternative, and rejected hypothesis to ensure absolutely no assumption",
+  "is left unchecked.",
+].join("\n")
 
 const OPENCODE_CONFIG_PATH = path.join(os.homedir(), ".config", "opencode", "opencode.json")
 const OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
@@ -155,6 +165,137 @@ function getSessionCrofaiModelID(api: TuiPluginApi, sessionID: string, providerI
     }
   }
   return undefined
+}
+
+function isCrofaiChatCompletionsURL(value: string): boolean {
+  try {
+    const url = new URL(value)
+    if (!CROFAI_ORIGINS.includes(url.origin as typeof CROFAI_ORIGINS[number])) return false
+    return url.pathname.endsWith("/chat/completions")
+  } catch {
+    return false
+  }
+}
+
+function isDeepSeekV4Model(model: unknown): boolean {
+  return typeof model === "string" && model.toLowerCase().startsWith("deepseek-v4")
+}
+
+function usesMaxReasoningEffort(payload: Record<string, unknown>): boolean {
+  const effort = payload.reasoningEffort
+  return typeof effort === "string" && effort.toLowerCase() === "max"
+}
+
+function hasMaxReasoningPrompt(messages: unknown): boolean {
+  if (!Array.isArray(messages)) return false
+  return messages.some((message) => {
+    if (!isObject(message)) return false
+    if (message.role !== "system") return false
+    if (typeof message.content !== "string") return false
+    return message.content.includes(MAX_REASONING_SYSTEM_PROMPT)
+  })
+}
+
+function injectMaxReasoningPrompt(payload: Record<string, unknown>): Record<string, unknown> {
+  if (!isDeepSeekV4Model(payload.model)) return payload
+  if (!usesMaxReasoningEffort(payload)) return payload
+
+  const messages = payload.messages
+  if (!Array.isArray(messages) || hasMaxReasoningPrompt(messages)) return payload
+
+  return {
+    ...payload,
+    messages: [
+      { role: "system", content: MAX_REASONING_SYSTEM_PROMPT },
+      ...messages,
+    ],
+  }
+}
+
+function rewriteChatCompletionsBody(bodyText: string): string | null {
+  try {
+    const parsed = JSON.parse(bodyText)
+    if (!isObject(parsed)) return null
+
+    const nextPayload = injectMaxReasoningPrompt(parsed)
+    if (nextPayload === parsed) return null
+    return JSON.stringify(nextPayload)
+  } catch {
+    return null
+  }
+}
+
+function requestURLFromFetchInput(input: Parameters<typeof fetch>[0]): string | null {
+  if (typeof input === "string") return input
+  if (input instanceof URL) return input.toString()
+  if (input instanceof Request) return input.url
+  return null
+}
+
+async function rewrittenRequestForMaxReasoning(
+  input: Parameters<typeof fetch>[0],
+  init?: RequestInit,
+): Promise<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> {
+  const url = requestURLFromFetchInput(input)
+  if (!url || !isCrofaiChatCompletionsURL(url)) return { input, init }
+
+  if (init?.body && typeof init.body === "string") {
+    const rewrittenBody = rewriteChatCompletionsBody(init.body)
+    if (!rewrittenBody) return { input, init }
+    return { input, init: { ...init, body: rewrittenBody } }
+  }
+
+  if (!(input instanceof Request) || init?.body) return { input, init }
+  const bodyText = await input.clone().text()
+  if (!bodyText) return { input, init }
+
+  const rewrittenBody = rewriteChatCompletionsBody(bodyText)
+  if (!rewrittenBody) return { input, init }
+
+  const rewrittenRequest = new Request(input, {
+    ...init,
+    body: rewrittenBody,
+  })
+  return { input: rewrittenRequest, init: undefined }
+}
+
+function installReasoningStreamPatch(): void {
+  const globalStore = globalThis as typeof globalThis & {
+    [FETCH_PATCH_SYMBOL]?: FetchPatchState
+  }
+
+  const existing = globalStore[FETCH_PATCH_SYMBOL]
+  if (existing) {
+    existing.refs += 1
+    return
+  }
+
+  const originalFetch = globalThis.fetch.bind(globalThis)
+
+  globalThis.fetch = (async (input, init) => {
+    const rewritten = await rewrittenRequestForMaxReasoning(input, init)
+    return originalFetch(rewritten.input, rewritten.init)
+  }) as typeof fetch
+
+  globalStore[FETCH_PATCH_SYMBOL] = {
+    originalFetch,
+    refs: 1,
+  }
+}
+
+function uninstallReasoningStreamPatch(): void {
+  const globalStore = globalThis as typeof globalThis & {
+    [FETCH_PATCH_SYMBOL]?: FetchPatchState
+  }
+
+  const state = globalStore[FETCH_PATCH_SYMBOL]
+  if (!state) return
+
+  state.refs -= 1
+  if (state.refs > 0) return
+
+  globalThis.fetch = state.originalFetch
+  delete globalStore[FETCH_PATCH_SYMBOL]
 }
 
 function formatNum(n: number): string {
@@ -433,53 +574,6 @@ function liveProviderNeedsModelReload(api: TuiPluginApi, providerName: string, i
   return false
 }
 
-function getFetchUrl(input: Parameters<typeof fetch>[0]): string | undefined {
-  if (typeof input === "string") return input
-  if (input instanceof URL) return input.toString()
-  if (typeof Request !== "undefined" && input instanceof Request) return input.url
-  if (isObject(input) && typeof input.url === "string") return input.url
-  return undefined
-}
-
-function isCrofaiChatCompletionUrl(value: string | undefined): boolean {
-  if (!value) return false
-  try {
-    const url = new URL(value)
-    return CROFAI_ORIGINS.some(origin => url.origin === origin) && url.pathname === "/v1/chat/completions"
-  } catch {
-    return CROFAI_ORIGINS.some(origin => value.startsWith(`${origin}/v1/chat/completions`))
-  }
-}
-
-function createCrofaiReasoningTransform(): TransformStream<Uint8Array, Uint8Array> {
-  const decoder = new TextDecoder()
-  const encoder = new TextEncoder()
-  const needle = "\"reasoning_content\""
-  const replacement = "\"reasoning_text\""
-  const carryLength = needle.length - 1
-  let carry = ""
-
-  return new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      const text = carry + decoder.decode(chunk, { stream: true })
-      const emitLength = Math.max(0, text.length - carryLength)
-      const emit = text.slice(0, emitLength).replaceAll(needle, replacement)
-      carry = text.slice(emitLength)
-      if (emit) controller.enqueue(encoder.encode(emit))
-    },
-    flush(controller) {
-      const tail = (carry + decoder.decode()).replaceAll(needle, replacement)
-      if (tail) controller.enqueue(encoder.encode(tail))
-    },
-  })
-}
-
-function installCrofaiReasoningStreamPatch(): () => void {
-  // Disabled: mutating SSE byte streams can interfere with incremental token rendering.
-  // Keep this function as a no-op to preserve plugin lifecycle wiring.
-  return () => {}
-}
-
 function buildSidebar(
   api: TuiPluginApi,
   d: UsageData | null,
@@ -558,8 +652,6 @@ function buildSidebar(
 }
 
 const tui: TuiPlugin = async (api) => {
-  const uninstallReasoningStreamPatch = installCrofaiReasoningStreamPatch()
-
   const activeSessions = new Set<string>()
   const startedAt = Date.now()
   let pendingModelReload = false
@@ -671,6 +763,8 @@ const tui: TuiPlugin = async (api) => {
     return
   }
   const crofaiProviderIDs = new Set(providers.map(p => p.id))
+
+  installReasoningStreamPatch()
 
   const [getData, setData] = createSignal<UsageData | null>(null)
   const [getErr, setErr] = createSignal(false)
