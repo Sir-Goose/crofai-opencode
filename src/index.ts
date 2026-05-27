@@ -626,18 +626,79 @@ const tui: TuiPlugin = async (api) => {
   const [getCurrentSessionID, setCurrentSessionID] = createSignal<string | null>(null)
   let childTokenRefreshSeq = 0
   const childTokenRefreshInFlight = new Set<string>()
+  const childTokenCooldown = new Map<string, number>()
+  const CHILD_TOKEN_COOLDOWN_MS = SESSION_UPDATE_REFRESH_MIN_INTERVAL_MS
+  const CHILD_TOKEN_COOLDOWN_MAX_SIZE = 50
+  let lastSidebarTokenFetch = 0
 
+  /**
+   * Safely log a warning message, guarding against environments where
+   * console may be closed or unavailable (sandboxed runtimes, test runners).
+   * Falls back silently if logging is unavailable.
+   * @param  {...any} args - Arguments to forward to console.warn
+   */
+  function safeWarn(...args: unknown[]): void {
+    try {
+      if (typeof console?.warn === 'function') {
+        // Use console.warn.apply to forward all arguments as structured values
+        console.warn(...args)
+      }
+    } catch {
+      // Swallow logging failures — they must never propagate as rejections
+    }
+  }
+
+  /**
+   * Recursively refresh child tokens for the given session.
+   * Errors are logged internally; this function never rejects.
+   * @param {string} sessionID - The session ID to refresh tokens for.
+   * @param {boolean} [force=false] - If true, bypass cooldown check.
+   * @returns {Promise<void>} A promise that always resolves (never rejects).
+   *   Callers should NOT add .catch() handlers — errors are self-contained.
+   */
   async function refreshChildTokens(sessionID: string, force: boolean = false): Promise<void> {
-    if (!force && childTokenRefreshInFlight.has(sessionID)) return
-    if (!force && getChildTokens()?.sessionID === sessionID) return
+    // Guard: Reject invalid session IDs early
+    if (typeof sessionID !== 'string' || sessionID.length === 0) {
+      safeWarn('[refreshChildTokens] invalid sessionID, skipping')
+      return
+    }
+
+    if (!force) {
+      // Cooldown check first — avoids TOCTOU race with in-flight completion
+      const lastRefresh = childTokenCooldown.get(sessionID)
+      if (lastRefresh && Date.now() - lastRefresh < CHILD_TOKEN_COOLDOWN_MS) return
+      // In-flight check second
+      if (childTokenRefreshInFlight.has(sessionID)) return
+    }
+
     const seq = ++childTokenRefreshSeq
     childTokenRefreshInFlight.add(sessionID)
+    if (!force) {
+      childTokenCooldown.set(sessionID, Date.now())
+      // Burst guard: evict oldest if map grows unexpectedly between pruning cycles
+      if (childTokenCooldown.size > CHILD_TOKEN_COOLDOWN_MAX_SIZE * 2) {
+        let oldestKey: string | null = null
+        let oldestTs = Infinity
+        for (const [k, v] of childTokenCooldown) {
+          if (v < oldestTs) { oldestTs = v; oldestKey = k }
+        }
+        if (oldestKey !== null) childTokenCooldown.delete(oldestKey)
+      }
+    }
+
     try {
       const tokens = await collectChildTokens(api, sessionID)
       if (seq !== childTokenRefreshSeq || getCurrentSessionID() !== sessionID) return
       setChildTokens({ sessionID, tokens: tokens.total > 0 ? tokens : null })
+    } catch (error) {
+      // Don't block retries on transient failures
+      if (!force) childTokenCooldown.delete(sessionID)
+      // Log the error safely — never propagate as a rejection
+      safeWarn('[refreshChildTokens] failed (session=' + sessionID + '):', error)
     } finally {
-      childTokenRefreshInFlight.delete(sessionID)
+      // Defensive: use optional chaining in case the set was cleaned up
+      // (e.g. in test environments or module teardown)
+      childTokenRefreshInFlight?.delete(sessionID)
     }
   }
 
@@ -687,20 +748,34 @@ const tui: TuiPlugin = async (api) => {
         void refresh()
         if (ENABLE_CHILD_TOKEN_REFRESH) {
           const sid = getCurrentSessionID()
-          if (sid) void refreshChildTokens(sid, false)
+          if (sid) // refreshChildTokens never rejects; errors are self-contained
+ void refreshChildTokens(sid, false)
+        }
+        // Prune cooldown map: evict oldest entry if over limit
+        if (childTokenCooldown.size > CHILD_TOKEN_COOLDOWN_MAX_SIZE) {
+          let oldestKey: string | null = null
+          let oldestTs = Infinity
+          for (const [k, v] of childTokenCooldown) {
+            if (v < oldestTs) { oldestTs = v; oldestKey = k }
+          }
+          if (oldestKey !== null) childTokenCooldown.delete(oldestKey)
         }
       }, 30000)
     : undefined
 
   let lastSessionUpdateRefreshAt = 0
   const onSessionUpdated = async () => {
-    if (!backgroundReady) return
+    if (disposed) return
     const now = Date.now()
-    if (now - lastSessionUpdateRefreshAt < SESSION_UPDATE_REFRESH_MIN_INTERVAL_MS) return
-    lastSessionUpdateRefreshAt = now
-    if (ENABLE_USAGE_REFRESH) void refresh()
+    // Only usage refresh is gated behind backgroundReady.
+    // Child token refresh always runs (has its own cooldown via childTokenCooldown map).
+    if (backgroundReady && now - lastSessionUpdateRefreshAt >= SESSION_UPDATE_REFRESH_MIN_INTERVAL_MS) {
+      lastSessionUpdateRefreshAt = now
+      if (ENABLE_USAGE_REFRESH) void refresh()
+    }
     const sid = getCurrentSessionID()
-    if (sid && ENABLE_CHILD_TOKEN_REFRESH) void refreshChildTokens(sid, false)
+    if (sid && ENABLE_CHILD_TOKEN_REFRESH) // refreshChildTokens never rejects; errors are self-contained
+ void refreshChildTokens(sid, false)
   }
 
   const sessionUnsub =
@@ -709,12 +784,13 @@ const tui: TuiPlugin = async (api) => {
   const sessionStatusRefreshUnsub =
     ENABLE_USAGE_REFRESH || ENABLE_CHILD_TOKEN_REFRESH
       ? api.event.on("session.status", (event) => {
-          if (!backgroundReady) return
-          if (event.properties.status.type !== "idle") return
+          if (disposed) return
+          if (event.properties.status?.type !== "idle") return
           const sid = getCurrentSessionID()
           if (!sid || sid !== event.properties.sessionID) return
-          if (ENABLE_USAGE_REFRESH) void refresh()
-          if (ENABLE_CHILD_TOKEN_REFRESH) void refreshChildTokens(sid, true)
+          if (backgroundReady && ENABLE_USAGE_REFRESH) void refresh()
+          if (ENABLE_CHILD_TOKEN_REFRESH) // refreshChildTokens never rejects; errors are self-contained
+ void refreshChildTokens(sid, true)
         })
       : () => {}
 
@@ -722,10 +798,12 @@ const tui: TuiPlugin = async (api) => {
     backgroundReadyTimer = undefined
     if (disposed) return
     backgroundReady = true
+    lastSessionUpdateRefreshAt = Date.now() // reset so pre-grace events don't delay first post-grace usage refresh
     if (ENABLE_MODEL_REFRESH) void refreshModels()
     if (ENABLE_USAGE_REFRESH) void refresh()
     const sid = getCurrentSessionID()
-    if (sid && ENABLE_CHILD_TOKEN_REFRESH) void refreshChildTokens(sid, false)
+    if (sid && ENABLE_CHILD_TOKEN_REFRESH) // refreshChildTokens never rejects; errors are self-contained
+ void refreshChildTokens(sid, false)
   }, BACKGROUND_STARTUP_GRACE_MS)
 
   api.lifecycle.onDispose(() => {
@@ -738,6 +816,7 @@ const tui: TuiPlugin = async (api) => {
     sessionStatusUnsub()
     sessionUnsub()
     sessionStatusRefreshUnsub()
+    childTokenCooldown.clear()
   })
 
   api.slots.register({
@@ -746,7 +825,26 @@ const tui: TuiPlugin = async (api) => {
       sidebar_content(_ctx, props) {
         if (!isCrofaiSession(api, props.session_id, crofaiProviderIDs)) return null
         setCurrentSessionID(props.session_id)
-        if (backgroundReady && ENABLE_CHILD_TOKEN_REFRESH) refreshChildTokens(props.session_id)
+        if (ENABLE_CHILD_TOKEN_REFRESH && props.session_id) {
+          // Local retry debounce: prevent rapid-fire retries when the sidebar
+          // re-renders repeatedly during a persistent network outage. Without
+          // this, every re-render after a failure could fire a new call
+          // before the in-flight set serialises.
+          const now = Date.now()
+          if (now - lastSidebarTokenFetch < CHILD_TOKEN_COOLDOWN_MS) {
+            // skip — cooldown active
+          } else {
+            lastSidebarTokenFetch = now
+
+            // Early-return: skip refresh when we already have fresh child tokens
+            // for this session. The periodic 30s interval and session events
+            // handle ongoing refreshes.
+            if (getChildTokens()?.sessionID !== props.session_id) {
+              // refreshChildTokens never rejects; errors are self-contained
+              void refreshChildTokens(props.session_id)
+            }
+          }
+        }
         const sessionProvider = getSessionCrofaiProvider(api, props.session_id, providers)
         const modelID = getSessionCrofaiModelID(api, props.session_id, crofaiProviderIDs)
         const tps = modelID ? (getPricingModels().find((model) => model.id === modelID)?.speed ?? null) : null
